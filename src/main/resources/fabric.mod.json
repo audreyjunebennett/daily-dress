@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "daily_dress",
+  "version": "${version}",
+  "name": "Daily Dress",
+  "description": "Wake up in a new outfit, with automatic private wardrobe sync through Minecraft.",
+  "authors": ["Ruby", "Codex"],
+  "license": "MIT",
+  "icon": "assets/daily_dress/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "dev.roses.dailydress.DailyDress"
+    ],
+    "client": [
+      "dev.roses.dailydress.client.DailyDressClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.2",
+    "fabric-api": "*",
+    "fabrictailor": ">=2.10.0"
+  }
+}
