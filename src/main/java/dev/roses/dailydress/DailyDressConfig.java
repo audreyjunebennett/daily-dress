@@ -20,6 +20,7 @@ public final class DailyDressConfig {
 
     public boolean enabledByDefault = false;
     public boolean useSlimModel = true;
+    public String skinModel = "auto";
     public boolean includeSharedWardrobe = false;
     public boolean announceOutfit = false;
     public boolean avoidImmediateRepeats = true;
@@ -83,5 +84,8 @@ public final class DailyDressConfig {
         if (enabledPlayers == null) enabledPlayers = new HashSet<>();
         if (sharedWardrobe == null || sharedWardrobe.isBlank()) sharedWardrobe = "wardrobe/shared";
         if (personalWardrobes == null || personalWardrobes.isBlank()) personalWardrobes = "wardrobe/players";
+        if (skinModel == null || (!skinModel.equalsIgnoreCase("auto")
+                && !skinModel.equalsIgnoreCase("slim")
+                && !skinModel.equalsIgnoreCase("classic"))) skinModel = "auto";
     }
 }

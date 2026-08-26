@@ -15,7 +15,7 @@ from typing import Callable
 
 from PIL import Image, ImageDraw, ImageTk
 
-from skin_styler_core import normalize_skin, render_player_view
+from skin_styler_core import detect_skin_model, normalize_skin, render_player_view
 
 
 STATUSES = {
@@ -36,6 +36,12 @@ FILTERS = {
     "All skins": None,
     "Unsorted": "unsorted",
     "Favorites": "favorite",
+    "Favorite dresses": "favorite+dresses",
+    "Favorite casual": "favorite+casual",
+    "Favorite seasonal": "favorite+seasonal",
+    "Dresses": "tag:dresses",
+    "Casual": "tag:casual",
+    "Seasonal": "tag:seasonal",
     "Maybe": "maybe",
     "Remove": "remove",
     "Visual duplicates": "duplicates",
@@ -74,7 +80,7 @@ class PickerState:
         root = Path(appdata) if appdata else Path.home() / ".config"
         self.path = root / "Daily Dress Skin Styler" / "wardrobe-picker-state.json"
         self.source_key = str(source.resolve()).casefold()
-        self.data: dict = {"version": 1, "sources": {}}
+        self.data: dict = {"version": 2, "sources": {}}
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict) and isinstance(loaded.get("sources"), dict):
@@ -97,13 +103,71 @@ class PickerState:
         return {"status": status, "tag": tag}
 
     def set(self, relative: str, *, status: str | None = None, tag: str | None = None) -> None:
-        current = self.get(relative)
+        current = dict(self.source_data.get(relative, {}))
+        current.update(self.get(relative))
         if status is not None:
             current["status"] = status
         if tag is not None:
             current["tag"] = tag
         self.source_data[relative] = current
         self.save()
+
+    def details(self, relative: str) -> dict[str, object]:
+        """Return styling metadata while keeping ``get`` backward-compatible."""
+
+        basic = self.get(relative)
+        saved = self.source_data.get(relative, {})
+        model = str(saved.get("model", "auto"))
+        if model not in ("auto", "slim", "classic"):
+            model = "auto"
+        corrections = saved.get("corrections", {})
+        if not isinstance(corrections, dict):
+            corrections = {}
+        hair_mode = str(saved.get("hair_mode", "auto"))
+        if hair_mode not in ("auto", "none"):
+            hair_mode = "auto"
+        return {**basic, "model": model, "hair_mode": hair_mode, "corrections": dict(corrections)}
+
+    def set_model(self, relative: str, model: str) -> None:
+        if model not in ("auto", "slim", "classic"):
+            raise ValueError(f"Unsupported skin model: {model}")
+        saved = dict(self.source_data.get(relative, {}))
+        saved.update(self.get(relative))
+        saved["model"] = model
+        self.source_data[relative] = saved
+        self.save()
+
+    def set_hair_mode(self, relative: str, mode: str) -> None:
+        if mode not in ("auto", "none"):
+            raise ValueError(f"Unsupported hair mode: {mode}")
+        saved = dict(self.source_data.get(relative, {}))
+        saved.update(self.get(relative))
+        saved["hair_mode"] = mode
+        self.source_data[relative] = saved
+        self.save()
+
+    def get_corrections(self, relative: str) -> dict[tuple[int, int], str]:
+        raw = self.details(relative)["corrections"]
+        parsed: dict[tuple[int, int], str] = {}
+        for key, category in raw.items():
+            try:
+                x_text, y_text = str(key).split(",", 1)
+                parsed[(int(x_text), int(y_text))] = str(category)
+            except (TypeError, ValueError):
+                continue
+        return parsed
+
+    def set_corrections(self, relative: str, corrections: dict[tuple[int, int], str]) -> None:
+        saved = dict(self.source_data.get(relative, {}))
+        saved.update(self.get(relative))
+        saved["corrections"] = {
+            f"{x},{y}": category for (x, y), category in sorted(corrections.items())
+        }
+        self.source_data[relative] = saved
+        self.save()
+
+    def generation_metadata(self) -> dict[str, dict[str, object]]:
+        return {relative: self.details(relative) for relative in self.source_data}
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,13 +310,14 @@ class WardrobePicker(tk.Toplevel):
         ttk.Button(nav, text="Next →", command=lambda: self._move_selection(1)).pack(side="right")
         ttk.Button(nav, text="Undo last  [Ctrl+Z]", command=self._undo_status).pack(expand=True)
 
-        export_frame = ttk.LabelFrame(detail, text="Create folders safely", padding=8)
+        export_frame = ttk.LabelFrame(detail, text="Ready for styling", padding=8)
         export_frame.pack(fill="x", pady=(2, 8))
-        ttk.Button(export_frame, text="Create Favorites master folder…", command=self._export_favorites).pack(fill="x", pady=(0, 5))
-        ttk.Button(export_frame, text="Create full organized copy…", command=self._export_organized).pack(fill="x")
         ttk.Label(
             export_frame,
-            text="Exports are new copies. Nothing is moved or deleted.",
+            text=(
+                "No folder copies are needed. Close this view when you are done: the main Styler reads these saved choices, "
+                "skips Remove, and carries favorites/categories into the sync wardrobe."
+            ),
             foreground="#777777",
             wraplength=260,
         ).pack(fill="x", pady=(6, 0))
@@ -276,6 +341,15 @@ class WardrobePicker(tk.Toplevel):
             and (
                 status_filter is None
                 or (status_filter == "duplicates" and entry.relative in self.duplicate_counts)
+                or (
+                    status_filter.startswith("tag:")
+                    and self.state_store.get(entry.relative)["tag"] == status_filter.split(":", 1)[1]
+                )
+                or (
+                    status_filter.startswith("favorite+")
+                    and self.state_store.get(entry.relative)["status"] == "favorite"
+                    and self.state_store.get(entry.relative)["tag"] == status_filter.split("+", 1)[1]
+                )
                 or self.state_store.get(entry.relative)["status"] == status_filter
             )
         ]
@@ -363,7 +437,9 @@ class WardrobePicker(tk.Toplevel):
             return cached
         try:
             with Image.open(entry.path) as image:
-                preview = render_player_view(image, scale=4, slim=True)
+                saved_model = str(self.state_store.details(entry.relative)["model"])
+                slim = saved_model == "slim" or (saved_model == "auto" and detect_skin_model(image) == "slim")
+                preview = render_player_view(image, scale=4, slim=slim)
         except Exception:
             preview = Image.new("RGBA", (56, 128), (65, 30, 38, 255))
             draw = ImageDraw.Draw(preview)
@@ -395,8 +471,10 @@ class WardrobePicker(tk.Toplevel):
         self.tag_var.set(state["tag"])
         try:
             with Image.open(entry.path) as image:
-                front = ImageTk.PhotoImage(render_player_view(image, scale=6, slim=True))
-                back = ImageTk.PhotoImage(render_player_view(image, scale=6, back=True, slim=True))
+                saved_model = str(self.state_store.details(entry.relative)["model"])
+                slim = saved_model == "slim" or (saved_model == "auto" and detect_skin_model(image) == "slim")
+                front = ImageTk.PhotoImage(render_player_view(image, scale=6, slim=slim))
+                back = ImageTk.PhotoImage(render_player_view(image, scale=6, back=True, slim=slim))
             self.detail_images = [front, back]
             self.front_preview.configure(image=front, text="")
             self.back_preview.configure(image=back, text="")
@@ -462,9 +540,19 @@ class WardrobePicker(tk.Toplevel):
         if self.selected_relative is None:
             return
         try:
-            self.state_store.set(self.selected_relative, tag=self.tag_var.get())
-            self._refresh_card(self.selected_relative)
-            self._select(self.selected_relative)
+            relative = self.selected_relative
+            selected_tag = self.tag_var.get()
+            try:
+                index = next(i for i, entry in enumerate(self.visible_entries) if entry.relative == relative)
+            except StopIteration:
+                index = 0
+            next_relative = self.visible_entries[(index + 1) % len(self.visible_entries)].relative if len(self.visible_entries) > 1 else relative
+            self.state_store.set(relative, tag=selected_tag)
+            self._refresh_card(relative)
+            self._select(next_relative)
+            self.message_var.set(
+                f"Categorized {self.entry_by_relative[relative].path.stem} as {TAGS[selected_tag]}; moved to the next skin."
+            )
         except OSError as exception:
             messagebox.showerror("Could not save category", str(exception), parent=self)
 

@@ -30,6 +30,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 public final class ClientWardrobeSync {
+    private static final String METADATA_FILE = "daily-dress-wardrobe.json";
     private final Path outbox = FabricLoader.getInstance().getConfigDir()
             .resolve("daily-dress")
             .resolve("sync-outbox")
@@ -149,13 +150,19 @@ public final class ClientWardrobeSync {
         try (var paths = Files.walk(outbox)) {
             files = paths
                     .filter(Files::isRegularFile)
-                    .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png"))
+                    .filter(path -> {
+                        String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+                        return name.endsWith(".png") || name.equals(METADATA_FILE);
+                    })
                     .sorted(Comparator.comparing(path -> outbox.relativize(path).toString().toLowerCase(Locale.ROOT)))
                     .toList();
         }
         String metadata = metadataFingerprint(files);
-        if (metadata.equals(previousMetadata) || files.isEmpty()) return new DirectoryScan(metadata, null);
-        if (files.size() > SyncPackets.MAX_FILES) throw new IOException("The sync outbox contains more than " + SyncPackets.MAX_FILES + " skins");
+        List<Path> skinFiles = files.stream()
+                .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png"))
+                .toList();
+        if (metadata.equals(previousMetadata) || skinFiles.isEmpty()) return new DirectoryScan(metadata, null);
+        if (skinFiles.size() > SyncPackets.MAX_FILES) throw new IOException("The sync outbox contains more than " + SyncPackets.MAX_FILES + " skins");
 
         long uncompressed = 0;
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
@@ -166,9 +173,11 @@ public final class ClientWardrobeSync {
                 uncompressed += fileBytes;
                 if (uncompressed > SyncPackets.MAX_UNCOMPRESSED_BYTES) throw new IOException("The sync outbox is too large");
 
-                BufferedImage image = ImageIO.read(path.toFile());
-                if (image == null || image.getWidth() != 64 || image.getHeight() != 64) {
-                    throw new IOException(path.getFileName() + " is not a valid 64x64 PNG skin");
+                if (path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png")) {
+                    BufferedImage image = ImageIO.read(path.toFile());
+                    if (image == null || image.getWidth() != 64 || image.getHeight() != 64) {
+                        throw new IOException(path.getFileName() + " is not a valid 64x64 PNG skin");
+                    }
                 }
 
                 String relative = outbox.relativize(path).toString().replace('\\', '/');
@@ -181,7 +190,7 @@ public final class ClientWardrobeSync {
         }
         byte[] archive = bytes.toByteArray();
         if (archive.length > SyncPackets.MAX_ARCHIVE_BYTES) throw new IOException("The compressed sync wardrobe is too large");
-        return new DirectoryScan(metadata, new PreparedUpload(sha256(archive), archive, files.size()));
+        return new DirectoryScan(metadata, new PreparedUpload(sha256(archive), archive, skinFiles.size()));
     }
 
     private String metadataFingerprint(List<Path> files) throws IOException {

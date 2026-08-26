@@ -2,10 +2,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 import colorsys
+import json
 
 from PIL import Image
 
 from skin_styler_core import (
+    detect_skin_model,
     FaceTemplate,
     _fill_small_torso_hair_gaps,
     _hair_core_palette,
@@ -45,6 +47,60 @@ def synthetic_skin(hair=(40, 20, 10, 255), eye=(20, 30, 80, 255), size=64):
 
 
 class SkinStylerTests(unittest.TestCase):
+    def test_black_hair_receives_target_color_without_flattening_dark_shading(self):
+        original = synthetic_skin(hair=(2, 2, 2, 255))
+        original.putpixel((9, 1), (14, 14, 14, 255))
+
+        styled, mask, _ = style_skin(original, (155, 70, 205), 42)
+
+        self.assertIn((9, 1), mask)
+        self.assertNotEqual(styled.getpixel((9, 1)), original.getpixel((9, 1)))
+        self.assertGreater(styled.getpixel((9, 1))[2], styled.getpixel((9, 1))[0])
+        self.assertLess(sum(styled.getpixel((8, 1))[:3]), sum(styled.getpixel((9, 1))[:3]))
+
+    def test_manual_category_overrides_can_reclaim_and_ignore_individual_pixels(self):
+        original = synthetic_skin(hair=(80, 40, 20, 255))
+        outfit = (20, 25)
+        hair = (9, 1)
+        outfit_before = original.getpixel(outfit)
+        hair_before = original.getpixel(hair)
+
+        styled, mask, _ = style_skin(
+            original,
+            (75, 180, 210),
+            42,
+            category_overrides={outfit: "hair", hair: "ignore"},
+        )
+
+        self.assertIn(outfit, mask)
+        self.assertNotIn(hair, mask)
+        self.assertNotEqual(styled.getpixel(outfit), outfit_before)
+        self.assertEqual(styled.getpixel(hair), hair_before)
+
+    def test_hood_override_can_disable_hair_recolor_for_one_skin(self):
+        hooded = synthetic_skin(hair=(65, 35, 80, 255))
+        before = hooded.getpixel((9, 1))
+
+        styled, mask, _ = style_skin(hooded, (220, 75, 90), suppress_hair=True)
+
+        self.assertFalse(mask)
+        self.assertEqual(styled.getpixel((9, 1)), before)
+
+    def test_skin_model_detection_handles_classic_and_slim_discriminator_strips(self):
+        classic = synthetic_skin()
+        for left, top, right, bottom in ((54, 20, 55, 31), (46, 52, 47, 63), (50, 16, 51, 19), (42, 48, 43, 51)):
+            for y in range(top, bottom + 1):
+                for x in range(left, right + 1):
+                    classic.putpixel((x, y), (50, 80, 120, 255))
+        slim = classic.copy()
+        for left, top, right, bottom in ((54, 20, 55, 31), (46, 52, 47, 63), (50, 16, 51, 19), (42, 48, 43, 51)):
+            for y in range(top, bottom + 1):
+                for x in range(left, right + 1):
+                    slim.putpixel((x, y), (0, 0, 0, 0))
+
+        self.assertEqual(detect_skin_model(classic), "classic")
+        self.assertEqual(detect_skin_model(slim), "slim")
+
     def test_recolor_is_confined_to_head_uv(self):
         original = synthetic_skin()
         styled, mask, _ = style_skin(original, (180, 40, 200), 55)
@@ -516,6 +572,36 @@ class SkinStylerTests(unittest.TestCase):
 
             self.assertTrue((output / "keep.png").is_file())
             self.assertFalse((output / "removed.png").exists())
+
+    def test_generation_uses_saved_working_set_and_writes_flat_sync_metadata(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            output = root / "output"
+            (source / "nested").mkdir(parents=True)
+            synthetic_skin().save(source / "nested" / "favorite.png")
+            synthetic_skin(hair=(90, 30, 90, 255)).save(source / "removed.png")
+            metadata = {
+                "nested/favorite.png": {"status": "favorite", "tag": "casual", "model": "classic"},
+                "removed.png": {"status": "remove", "tag": "seasonal"},
+            }
+
+            result = generate_folder(
+                source,
+                output,
+                (100, 80, 180),
+                standardize_face=False,
+                wardrobe_metadata=metadata,
+                batch_filter="favorites+casual",
+                flatten_output=True,
+            )
+
+            self.assertEqual(result.written, 1)
+            self.assertTrue((output / "favorite.png").is_file())
+            self.assertFalse((output / "nested").exists())
+            manifest = json.loads((output / "daily-dress-wardrobe.json").read_text(encoding="utf-8"))
+            self.assertTrue(manifest["skins"]["favorite.png"]["favorite"])
+            self.assertEqual(manifest["skins"]["favorite.png"]["tags"], ["casual"])
 
     def test_skin_tone_changes_matching_exposed_pixels_only(self):
         original = synthetic_skin()

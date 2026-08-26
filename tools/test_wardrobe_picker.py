@@ -38,8 +38,14 @@ class WardrobePickerTests(unittest.TestCase):
             with patch.dict(os.environ, {"APPDATA": str(root / "appdata")}):
                 state = PickerState(source)
                 state.set("outfit.png", status="favorite", tag="dresses")
+                state.set_model("outfit.png", "classic")
+                state.set_hair_mode("outfit.png", "none")
+                state.set_corrections("outfit.png", {(9, 1): "hair", (20, 25): "ignore"})
                 reloaded = PickerState(source)
                 self.assertEqual(reloaded.get("outfit.png"), {"status": "favorite", "tag": "dresses"})
+                self.assertEqual(reloaded.details("outfit.png")["model"], "classic")
+                self.assertEqual(reloaded.details("outfit.png")["hair_mode"], "none")
+                self.assertEqual(reloaded.get_corrections("outfit.png"), {(9, 1): "hair", (20, 25): "ignore"})
 
                 picker = object.__new__(WardrobePicker)
                 picker.source = source

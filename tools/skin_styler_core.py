@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import colorsys
+import json
 import math
+import re
 import shutil
 import statistics
 from collections import Counter
@@ -72,6 +74,18 @@ class InstallationResult:
     installed: int
 
 
+@dataclass(frozen=True)
+class SkinClassification:
+    """The editable material masks used by every recoloring operation."""
+
+    hair: frozenset[tuple[int, int]]
+    skin: frozenset[tuple[int, int]]
+    outfit: frozenset[tuple[int, int]]
+    accessory: frozenset[tuple[int, int]]
+    eyes: frozenset[tuple[int, int]]
+    ignored: frozenset[tuple[int, int]] = frozenset()
+
+
 def parse_hex_color(value: str) -> RGB:
     value = value.strip().lstrip("#")
     if len(value) == 3:
@@ -94,6 +108,49 @@ def normalize_skin(image: Image.Image) -> tuple[Image.Image, bool]:
     if width == height and width >= 64 and width % 64 == 0:
         return converted.resize((64, 64), Image.Resampling.NEAREST), True
     raise ValueError(f"unsupported dimensions {width}x{height}; expected 64x64 or an integer HD multiple")
+
+
+def detect_skin_model(image: Image.Image) -> str:
+    """Best-effort detection of Minecraft's slim (3 px) or classic (4 px) arms.
+
+    Proper slim skins leave four discriminator strips transparent. Artists and
+    skin sites do not always preserve every strip, so a majority vote is more
+    useful than requiring every pixel to be empty.
+    """
+
+    normalized, _ = normalize_skin(image)
+    pixels = normalized.load()
+    discriminator_strips = (
+        ((54, 20), (55, 31)),
+        ((46, 52), (47, 63)),
+        ((50, 16), (51, 19)),
+        ((42, 48), (43, 51)),
+    )
+    transparent = 0
+    total = 0
+    for (left, top), (right, bottom) in discriminator_strips:
+        for y in range(top, bottom + 1):
+            for x in range(left, right + 1):
+                total += 1
+                transparent += int(pixels[x, y][3] < 48)
+    return "slim" if transparent >= max(4, round(total * 0.55)) else "classic"
+
+
+def recommended_hair_tolerance(image: Image.Image, fallback: float = 42.0) -> float:
+    """Choose a restrained per-skin tolerance from the reference hair palette."""
+
+    normalized, _ = normalize_skin(image)
+    palette = hair_palette(normalized)
+    if not palette:
+        return min(34.0, fallback)
+    values = [colorsys.rgb_to_hsv(*(channel / 255 for channel in color))[2] for color in palette]
+    saturations = [colorsys.rgb_to_hsv(*(channel / 255 for channel in color))[1] for color in palette]
+    spread = (max(values) - min(values)) if len(values) > 1 else 0.0
+    neutral_dark = statistics.median(saturations) < 0.10 and statistics.median(values) < 0.34
+    # Textured hair needs slightly more reach; nearly black hair needs a tighter
+    # mask and is colorized explicitly later instead of expanding tolerance.
+    suggested = 36.0 if neutral_dark else 39.0 + spread * 20.0
+    return round(min(52.0, max(34.0, (suggested + fallback) / 2)), 1)
 
 
 def _quantize(color: RGB, step: int = 16) -> RGB:
@@ -954,6 +1011,8 @@ def recolor_hair(
         red, green, blue, _alpha = source[x, y]
         hue, saturation, value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
         if value < 0.02:
+            if colorize_neutrals:
+                source_values.append(0.06)
             continue
         source_values.append(value)
         if saturation < 0.04:
@@ -982,6 +1041,13 @@ def recolor_hair(
         red, green, blue, alpha = source[x, y]
         old_hue, old_saturation, old_value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
         if old_value < 0.02:
+            if not colorize_neutrals:
+                continue
+            new_hue = target_hue
+            new_saturation = target_saturation * max(0.35, neutral_saturation_floor)
+            new_value = max(0.025, target_value * 0.14)
+            changed = colorsys.hsv_to_rgb(new_hue, new_saturation, new_value)
+            destination[x, y] = tuple(round(channel * 255) for channel in changed) + (alpha,)
             continue
         if old_saturation < 0.04:
             if not colorize_neutrals:
@@ -1485,6 +1551,87 @@ def detect_outfit_mask(
     }
 
 
+def representative_hair_color(skin: Image.Image, tolerance: float = 42.0) -> RGB:
+    """Return a useful target swatch sampled from a skin's detected hairstyle."""
+
+    normalized, _ = normalize_skin(skin)
+    mask = detect_hair_mask(normalized, recommended_hair_tolerance(normalized, tolerance))
+    if not mask:
+        raise ValueError("No visible hair could be detected in that skin")
+    hue, saturation, value = _hair_hsv_center(normalized, mask)
+    red, green, blue = colorsys.hsv_to_rgb(hue, saturation, value)
+    return round(red * 255), round(green * 255), round(blue * 255)
+
+
+def classify_skin_categories(
+    skin: Image.Image,
+    tolerance: float = 42.0,
+    skin_tolerance: float = 24.0,
+    include_body_hair: bool = True,
+) -> SkinClassification:
+    """Return the automatic pixel categories shown by the correction editor."""
+
+    normalized, _ = normalize_skin(skin)
+    head_hair = detect_hair_mask(normalized, tolerance)
+    anatomical_skin = detect_skin_mask(normalized, head_hair, skin_tolerance)
+    body_hair = detect_body_hair_mask(normalized, tolerance) if include_body_hair else set()
+    combined_hair = head_hair | body_hair
+    skin_mask = detect_skin_mask(normalized, combined_hair, skin_tolerance) | anatomical_skin
+    accessory = detect_hair_accessory_mask(normalized, head_hair, body_hair, skin_mask)
+    effective_hair = combined_hair - skin_mask - accessory
+    outfit = detect_outfit_mask(normalized, effective_hair, skin_mask, accessory)
+    skin_color = _median_skin_color(normalized, head_hair)
+    eye_anchor = detect_eye_anchor(normalized, skin_color)
+    eyes = _bilateral_eye_features(normalized, skin_color, eye_anchor) - effective_hair
+    eyes |= {(x + 32, y) for x, y in eyes if 40 <= x + 32 < 48}
+    skin_mask -= eyes
+    outfit -= eyes
+    accessory -= eyes
+    return SkinClassification(
+        frozenset(effective_hair),
+        frozenset(skin_mask),
+        frozenset(outfit),
+        frozenset(accessory),
+        frozenset(eyes),
+    )
+
+
+def apply_category_overrides(
+    classification: SkinClassification,
+    overrides: dict[tuple[int, int], str] | None,
+) -> SkinClassification:
+    """Apply sparse, user-painted corrections without changing source pixels."""
+
+    if not overrides:
+        return classification
+    categories = {
+        "hair": set(classification.hair),
+        "skin": set(classification.skin),
+        "outfit": set(classification.outfit),
+        "accessory": set(classification.accessory),
+        "eyes": set(classification.eyes),
+        "ignore": set(classification.ignored),
+    }
+    valid = set(categories)
+    for coordinate, category in overrides.items():
+        if category not in valid:
+            continue
+        x, y = coordinate
+        if not (0 <= x < 64 and 0 <= y < 64):
+            continue
+        for material in categories.values():
+            material.discard(coordinate)
+        categories[category].add(coordinate)
+    return SkinClassification(
+        frozenset(categories["hair"]),
+        frozenset(categories["skin"]),
+        frozenset(categories["outfit"]),
+        frozenset(categories["accessory"]),
+        frozenset(categories["eyes"]),
+        frozenset(categories["ignore"]),
+    )
+
+
 def make_face_template(reference: Image.Image, hair_tolerance: float = 42.0) -> FaceTemplate:
     normalized, _ = normalize_skin(reference)
     hair_mask = detect_hair_mask(normalized, hair_tolerance)
@@ -1616,25 +1763,21 @@ def style_skin(
     target_outfit_color: RGB | None = None,
     target_accessory_color: RGB | None = None,
     preserve_hat_layer_lashes: bool = True,
+    category_overrides: dict[tuple[int, int], str] | None = None,
+    adaptive_detection: bool = False,
+    suppress_hair: bool = False,
 ) -> tuple[Image.Image, set[tuple[int, int]], bool]:
     normalized, was_normalized = normalize_skin(image)
-    original_hair_mask = detect_hair_mask(normalized, tolerance)
-    # Establish skin from the head-only hair guess before torso/shoulder
-    # tracing. If the body tracer makes a mistake, this independent mask can
-    # still reclaim the anatomical pixel instead of inheriting the mistake.
-    anatomical_skin_mask = detect_skin_mask(normalized, original_hair_mask, skin_tolerance)
-    body_hair_mask = detect_body_hair_mask(normalized, tolerance) if include_body_hair else set()
-    combined_hair_mask = original_hair_mask | body_hair_mask
-    skin_mask = detect_skin_mask(normalized, combined_hair_mask, skin_tolerance) | anatomical_skin_mask
-    accessory_mask = detect_hair_accessory_mask(
-        normalized,
-        original_hair_mask,
-        body_hair_mask,
-        skin_mask,
+    effective_tolerance = recommended_hair_tolerance(normalized, tolerance) if adaptive_detection else tolerance
+    classification = apply_category_overrides(
+        classify_skin_categories(normalized, effective_tolerance, skin_tolerance, include_body_hair),
+        category_overrides,
     )
-    effective_head_hair_mask = original_hair_mask - skin_mask - accessory_mask
-    effective_hair_mask = combined_hair_mask - skin_mask - accessory_mask
-    outfit_mask = detect_outfit_mask(normalized, effective_hair_mask, skin_mask, accessory_mask)
+    effective_hair_mask = set() if suppress_hair else set(classification.hair)
+    effective_head_hair_mask = set() if suppress_hair else {coordinate for coordinate in classification.hair if coordinate[1] < 16}
+    skin_mask = set(classification.skin)
+    accessory_mask = set(classification.accessory)
+    outfit_mask = set(classification.outfit)
     if target_skin_color is not None:
         base, _skin_mask = recolor_skin_tone(
             normalized,
@@ -1651,6 +1794,8 @@ def style_skin(
         tolerance,
         effective_hair_mask,
         effective_head_hair_mask,
+        colorize_neutrals=True,
+        neutral_saturation_floor=0.52,
     )
     if target_outfit_color is not None:
         styled, _outfit_mask = recolor_hair(
@@ -2023,6 +2168,10 @@ def generate_folder(
     target_outfit_color: RGB | None = None,
     target_accessory_color: RGB | None = None,
     preserve_hat_layer_lashes: bool = True,
+    wardrobe_metadata: dict[str, dict[str, object]] | None = None,
+    batch_filter: str = "all",
+    flatten_output: bool = False,
+    adaptive_detection: bool = False,
     progress: Callable[[int, int, Path], None] | None = None,
 ) -> GenerationResult:
     input_folder = input_folder.expanduser().resolve()
@@ -2042,8 +2191,28 @@ def generate_folder(
             template = make_face_template(reference, tolerance)
 
     files = sorted(input_folder.rglob("*.png"), key=lambda path: path.name.casefold())
+    metadata = wardrobe_metadata or {}
+
+    def included(path: Path) -> bool:
+        relative = path.relative_to(input_folder).as_posix()
+        saved = metadata.get(relative, {})
+        if str(saved.get("status", "unsorted")) == "remove":
+            return False
+        requested = batch_filter.strip().casefold()
+        if requested in ("", "all", "kept"):
+            return True
+        favorite = str(saved.get("status", "unsorted")) == "favorite"
+        tag = str(saved.get("tag", "other")).casefold()
+        pieces = {piece for piece in re.split(r"[+,&]", requested) if piece}
+        if "favorites" in pieces or "favorite" in pieces:
+            if not favorite:
+                return False
+            pieces -= {"favorites", "favorite"}
+        return not pieces or tag in pieces
+
+    files = [path for path in files if included(path)]
     if not files:
-        raise ValueError("No PNG skins were found")
+        raise ValueError("No kept PNG skins match the selected wardrobe batch")
 
     output_folder.parent.mkdir(parents=True, exist_ok=True)
     token = uuid4().hex
@@ -2053,11 +2222,25 @@ def generate_folder(
     written = 0
     normalized_count = 0
     skipped: list[str] = []
+    generated_metadata: dict[str, dict[str, object]] = {}
+    used_names: set[str] = set()
     total = len(files)
     try:
         for index, source_path in enumerate(files, 1):
             try:
                 with Image.open(source_path) as source_image:
+                    relative_key = source_path.relative_to(input_folder).as_posix()
+                    saved = metadata.get(relative_key, {})
+                    detected_model = detect_skin_model(source_image)
+                    raw_overrides = saved.get("corrections", {})
+                    overrides: dict[tuple[int, int], str] = {}
+                    if isinstance(raw_overrides, dict):
+                        for raw_coordinate, category in raw_overrides.items():
+                            try:
+                                x_text, y_text = str(raw_coordinate).split(",", 1)
+                                overrides[(int(x_text), int(y_text))] = str(category)
+                            except (TypeError, ValueError):
+                                continue
                     styled, _mask, was_normalized = style_skin(
                         source_image,
                         target_hair_color,
@@ -2071,11 +2254,33 @@ def generate_folder(
                         target_outfit_color,
                         target_accessory_color,
                         preserve_hat_layer_lashes,
+                        overrides,
+                        adaptive_detection,
+                        str(saved.get("hair_mode", "auto")) == "none",
                     )
                 relative = source_path.relative_to(input_folder)
-                destination = staging / relative
+                if flatten_output:
+                    candidate = source_path.name
+                    stem = source_path.stem
+                    suffix = source_path.suffix
+                    serial = 2
+                    while candidate.casefold() in used_names:
+                        candidate = f"{stem}-{serial}{suffix}"
+                        serial += 1
+                    used_names.add(candidate.casefold())
+                    output_relative = Path(candidate)
+                else:
+                    output_relative = relative
+                destination = staging / output_relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 styled.save(destination, format="PNG", optimize=False)
+                generated_metadata[output_relative.as_posix()] = {
+                    "source": relative.as_posix(),
+                    "favorite": str(saved.get("status", "unsorted")) == "favorite",
+                    "status": str(saved.get("status", "unsorted")),
+                    "tags": [str(saved.get("tag", "other"))],
+                    "model": str(saved.get("model", detected_model)),
+                }
                 written += 1
                 normalized_count += int(was_normalized)
             except Exception as exception:  # keep a large batch moving
@@ -2098,6 +2303,18 @@ def generate_folder(
             f"Preserve existing hat-layer lashes: {preserve_hat_layer_lashes if standardize_face else 'disabled'}\n"
             f"Match reference skin tone: {match_reference_skin_tone}\n"
             f"Written: {written}; normalized from HD: {normalized_count}; skipped: {len(skipped)}\n",
+            encoding="utf-8",
+        )
+        (staging / "daily-dress-wardrobe.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "batch": batch_filter,
+                    "skins": generated_metadata,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
 
@@ -2152,6 +2369,9 @@ def install_generated_wardrobe(generated_folder: Path, target_folder: Path) -> I
         manifest = generated_folder / "DAILY-DRESS-STYLING.txt"
         if manifest.is_file():
             shutil.copy2(manifest, staging / manifest.name)
+        metadata = generated_folder / "daily-dress-wardrobe.json"
+        if metadata.is_file():
+            shutil.copy2(metadata, staging / metadata.name)
         (staging / "DAILY DRESS SYNC OUTBOX.txt").write_text(
             "DAILY DRESS - PERSONAL SYNC OUTBOX\n"
             "===================================\n\n"

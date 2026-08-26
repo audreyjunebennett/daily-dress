@@ -1,6 +1,7 @@
 package dev.roses.dailydress;
 
 import com.mojang.authlib.properties.Property;
+import com.google.gson.Gson;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -18,11 +19,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HexFormat;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -31,6 +36,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
 public final class WardrobeService implements AutoCloseable {
+    private static final Gson GSON = new Gson();
+    private static final String METADATA_FILE = "daily-dress-wardrobe.json";
     private final DailyDress owner;
     private final Path root;
     private final Path statePath;
@@ -70,7 +77,11 @@ public final class WardrobeService implements AutoCloseable {
     public void dressNow(ServerPlayer player, boolean afterSleep) {
         List<Path> choices = findSkins(player);
         if (choices.isEmpty()) {
-            player.sendSystemMessage(styled("Daily Dress could not find any valid 64×64 PNGs in your wardrobe.", ChatFormatting.RED));
+            String batch = activeBatch(player);
+            String detail = batch.equals("all")
+                    ? "any valid 64×64 PNGs in your wardrobe"
+                    : "any outfits in your active “" + batch + "” batch; use /dailydress batch all to reset it";
+            player.sendSystemMessage(styled("Daily Dress could not find " + detail + ".", ChatFormatting.RED));
             return;
         }
 
@@ -147,6 +158,23 @@ public final class WardrobeService implements AutoCloseable {
         return findSkins(player).size();
     }
 
+    public int countAllSkins(ServerPlayer player) {
+        return findSkins(player, "all").size();
+    }
+
+    public String activeBatch(ServerPlayer player) {
+        return state.activeBatches.getOrDefault(player.getUUID().toString(), "all");
+    }
+
+    public int setBatch(ServerPlayer player, String requested) {
+        String batch = normalizeBatch(requested);
+        int count = findSkins(player, batch).size();
+        if (count == 0 && !batch.equals("all")) return 0;
+        state.activeBatches.put(player.getUUID().toString(), batch);
+        state.save(statePath, DailyDress.LOGGER);
+        return count;
+    }
+
     public Path sharedWardrobe() {
         return resolveInsideRoot(owner.config().sharedWardrobe);
     }
@@ -168,9 +196,13 @@ public final class WardrobeService implements AutoCloseable {
     }
 
     private List<Path> findSkins(ServerPlayer player) {
+        return findSkins(player, activeBatch(player));
+    }
+
+    private List<Path> findSkins(ServerPlayer player, String batch) {
         List<Path> skins = new ArrayList<>();
         if (owner.config().includeSharedWardrobe) {
-            collectValidSkins(sharedWardrobe(), skins);
+            collectValidSkins(sharedWardrobe(), skins, batch);
         }
         Path personal = personalWardrobe(player);
         try {
@@ -178,7 +210,7 @@ public final class WardrobeService implements AutoCloseable {
         } catch (IOException exception) {
             DailyDress.LOGGER.warn("Could not create personal wardrobe {}", personal, exception);
         }
-        collectValidSkins(personal, skins);
+        collectValidSkins(personal, skins, batch);
         return skins;
     }
 
@@ -195,12 +227,14 @@ public final class WardrobeService implements AutoCloseable {
         }
     }
 
-    private void collectValidSkins(Path directory, List<Path> destination) {
+    private void collectValidSkins(Path directory, List<Path> destination, String batch) {
         if (!Files.isDirectory(directory)) return;
+        WardrobeMetadata metadata = loadMetadata(directory);
         try (Stream<Path> files = Files.walk(directory)) {
             files.filter(Files::isRegularFile)
                     .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".png"))
                     .filter(this::isValidSkin)
+                    .filter(path -> matchesBatch(metadata, directory.relativize(path).toString().replace('\\', '/'), batch))
                     .forEach(destination::add);
         } catch (IOException exception) {
             DailyDress.LOGGER.warn("Could not scan wardrobe {}", directory, exception);
@@ -216,10 +250,99 @@ public final class WardrobeService implements AutoCloseable {
         }
     }
 
+    private static String normalizeBatch(String requested) {
+        if (requested == null || requested.isBlank()) return "all";
+        String normalized = requested.strip().toLowerCase(Locale.ROOT)
+                .replace(',', '+')
+                .replace('&', '+')
+                .replace(" ", "");
+        normalized = Arrays.stream(normalized.split("\\+"))
+                .map(part -> part.equals("favorite") ? "favorites" : part)
+                .reduce((left, right) -> left + "+" + right)
+                .orElse("all");
+        if (normalized.equals("kept")) return "all";
+        if (!normalized.matches("[a-z0-9_-]+(?:\\+[a-z0-9_-]+)*")) return "all";
+        return normalized;
+    }
+
+    private static boolean matchesBatch(WardrobeMetadata metadata, String relative, String batch) {
+        SkinMetadata skin = metadata.skins == null ? null : metadata.skins.get(relative);
+        if (skin != null && "remove".equalsIgnoreCase(skin.status)) return false;
+        String normalized = normalizeBatch(batch);
+        if (normalized.equals("all")) return true;
+        if (skin == null) return false;
+        Set<String> requested = new HashSet<>(Arrays.asList(normalized.split("\\+")));
+        if (requested.remove("favorites") && !skin.favorite) return false;
+        if (requested.isEmpty()) return true;
+        Set<String> tags = new HashSet<>();
+        if (skin.tags != null) {
+            skin.tags.stream().filter(java.util.Objects::nonNull)
+                    .map(value -> value.toLowerCase(Locale.ROOT)).forEach(tags::add);
+        }
+        return requested.stream().allMatch(tags::contains);
+    }
+
+    private WardrobeMetadata loadMetadata(Path directory) {
+        Path path = directory.resolve(METADATA_FILE);
+        if (!Files.isRegularFile(path)) return new WardrobeMetadata();
+        try (var reader = Files.newBufferedReader(path)) {
+            WardrobeMetadata metadata = GSON.fromJson(reader, WardrobeMetadata.class);
+            return metadata == null ? new WardrobeMetadata() : metadata;
+        } catch (Exception exception) {
+            DailyDress.LOGGER.warn("Could not read wardrobe metadata {}", path, exception);
+            return new WardrobeMetadata();
+        }
+    }
+
+    private SkinMetadata metadataFor(Path skinPath) {
+        Path current = skinPath.getParent();
+        Path normalizedRoot = root.toAbsolutePath().normalize();
+        while (current != null && current.toAbsolutePath().normalize().startsWith(normalizedRoot)) {
+            Path manifest = current.resolve(METADATA_FILE);
+            if (Files.isRegularFile(manifest)) {
+                WardrobeMetadata metadata = loadMetadata(current);
+                String relative = current.relativize(skinPath).toString().replace('\\', '/');
+                return metadata.skins == null ? null : metadata.skins.get(relative);
+            }
+            current = current.getParent();
+        }
+        return null;
+    }
+
+    private boolean isSlimModel(Path path) {
+        String configured = owner.config().skinModel.toLowerCase(Locale.ROOT);
+        if (configured.equals("slim")) return true;
+        if (configured.equals("classic")) return false;
+        SkinMetadata metadata = metadataFor(path);
+        if (metadata != null && metadata.model != null) {
+            if (metadata.model.equalsIgnoreCase("slim")) return true;
+            if (metadata.model.equalsIgnoreCase("classic")) return false;
+        }
+        try {
+            BufferedImage image = ImageIO.read(path.toFile());
+            if (image == null) return owner.config().useSlimModel;
+            int transparent = 0;
+            int total = 0;
+            int[][] strips = {{54, 20, 55, 31}, {46, 52, 47, 63}, {50, 16, 51, 19}, {42, 48, 43, 51}};
+            for (int[] strip : strips) {
+                for (int y = strip[1]; y <= strip[3]; y++) {
+                    for (int x = strip[0]; x <= strip[2]; x++) {
+                        total++;
+                        transparent += ((image.getRGB(x, y) >>> 24) & 0xff) < 48 ? 1 : 0;
+                    }
+                }
+            }
+            return transparent >= Math.max(4, Math.round(total * 0.55f));
+        } catch (IOException exception) {
+            return owner.config().useSlimModel;
+        }
+    }
+
     private void apply(ServerPlayer player, Path chosen, boolean afterSleep) {
         final String cacheKey;
+        final boolean slimModel = isSlimModel(chosen);
         try {
-            cacheKey = (owner.config().useSlimModel ? "slim:" : "classic:") + sha256(chosen);
+            cacheKey = (slimModel ? "slim:" : "classic:") + sha256(chosen);
         } catch (IOException exception) {
             player.sendSystemMessage(styled("Daily Dress could not read " + chosen.getFileName() + ".", ChatFormatting.RED));
             return;
@@ -236,7 +359,7 @@ public final class WardrobeService implements AutoCloseable {
         }
         CompletableFuture<Optional<Property>> future = pendingUploads.computeIfAbsent(cacheKey, ignored ->
                 CompletableFuture.supplyAsync(
-                        () -> SkinFetcher.setSkinFromFile(chosen.toAbsolutePath().toString(), owner.config().useSlimModel),
+                        () -> SkinFetcher.setSkinFromFile(chosen.toAbsolutePath().toString(), slimModel),
                         uploader
                 )
         );
@@ -313,6 +436,17 @@ public final class WardrobeService implements AutoCloseable {
 
     private static Component styled(String text, ChatFormatting color) {
         return Component.literal(text).withStyle(color);
+    }
+
+    private static final class WardrobeMetadata {
+        Map<String, SkinMetadata> skins = Collections.emptyMap();
+    }
+
+    private static final class SkinMetadata {
+        boolean favorite;
+        String status = "unsorted";
+        List<String> tags = Collections.emptyList();
+        String model = "auto";
     }
 
     @Override

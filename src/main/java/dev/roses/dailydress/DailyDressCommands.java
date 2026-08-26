@@ -31,6 +31,14 @@ public final class DailyDressCommands {
                 .then(Commands.literal("on").executes(context -> setEnabled(context.getSource(), true)))
                 .then(Commands.literal("off").executes(context -> setEnabled(context.getSource(), false)))
                 .then(Commands.literal("next").executes(context -> next(context.getSource())))
+                .then(Commands.literal("batch")
+                        .executes(context -> batchStatus(context.getSource()))
+                        .then(Commands.argument("filter", StringArgumentType.word())
+                                .executes(context -> setBatch(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "filter")
+                                )))
+                )
                 .then(Commands.literal("flag")
                         .executes(context -> flag(context.getSource(), ""))
                         .then(Commands.argument("note", StringArgumentType.greedyString())
@@ -79,6 +87,36 @@ public final class DailyDressCommands {
         return 1;
     }
 
+    private int batchStatus(CommandSourceStack source) throws CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        String batch = wardrobe.activeBatch(player);
+        int eligible = wardrobe.countSkins(player);
+        player.sendSystemMessage(message(
+                "Daily Dress sleep batch: “" + batch + "” (" + eligible + " outfit" + (eligible == 1 ? "" : "s")
+                        + "). Use /dailydress batch all, favorites, casual, seasonal, dresses, or favorites+casual.",
+                ChatFormatting.LIGHT_PURPLE
+        ));
+        return eligible;
+    }
+
+    private int setBatch(CommandSourceStack source, String requested) throws CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        int count = wardrobe.setBatch(player, requested);
+        if (count == 0) {
+            player.sendSystemMessage(message(
+                    "No synced outfits match “" + requested + "”, so your current sleep batch was not changed.",
+                    ChatFormatting.RED
+            ));
+            return 0;
+        }
+        player.sendSystemMessage(message(
+                "Daily Dress will now choose from “" + wardrobe.activeBatch(player) + "” after sleep (" + count
+                        + " outfit" + (count == 1 ? "" : "s") + ").",
+                ChatFormatting.LIGHT_PURPLE
+        ));
+        return count;
+    }
+
     private int flags(CommandSourceStack source) throws CommandSyntaxException {
         ServerPlayer player = source.getPlayerOrException();
         int count = wardrobe.flaggedCount(player);
@@ -94,10 +132,11 @@ public final class DailyDressCommands {
         ServerPlayer player = source.getPlayerOrException();
         boolean enabled = owner.config().isEnabled(player.getUUID());
         int count = wardrobe.countSkins(player);
+        int total = wardrobe.countAllSkins(player);
         player.sendSystemMessage(message(
                 "Daily Dress is " + (enabled ? "ON" : "OFF") + " for you; " + count
-                        + " valid outfits; " + wardrobe.flaggedCount(player) + " flagged; model: "
-                        + (owner.config().useSlimModel ? "slim" : "classic") + ".",
+                        + " eligible of " + total + " valid outfits in batch “" + wardrobe.activeBatch(player) + "”; "
+                        + wardrobe.flaggedCount(player) + " flagged; model: " + owner.config().skinModel + ".",
                 enabled ? ChatFormatting.LIGHT_PURPLE : ChatFormatting.GRAY
         ));
         return count;

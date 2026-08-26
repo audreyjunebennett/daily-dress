@@ -1,5 +1,6 @@
 package dev.roses.dailydress;
 
+import com.google.gson.JsonParser;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
@@ -35,6 +36,7 @@ import javax.imageio.stream.ImageInputStream;
 
 public final class ServerWardrobeSync implements AutoCloseable {
     private static final DateTimeFormatter BACKUP_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
+    private static final String METADATA_FILE = "daily-dress-wardrobe.json";
     private static final long OFFER_LIFETIME_NANOS = 5L * 60L * 1_000_000_000L;
 
     private final DailyDress owner;
@@ -205,15 +207,16 @@ public final class ServerWardrobeSync implements AutoCloseable {
                 if (entry.isDirectory()) continue;
                 String rawName = entry.getName().replace('\\', '/');
                 Path relative = Path.of(rawName).normalize();
+                boolean metadata = rawName.equals(METADATA_FILE);
                 if (rawName.startsWith("/")
                         || relative.isAbsolute()
                         || relative.startsWith("..")
-                        || !rawName.toLowerCase(Locale.ROOT).endsWith(".png")) {
+                        || (!rawName.toLowerCase(Locale.ROOT).endsWith(".png") && !metadata)) {
                     throw new IOException("unsafe archive entry " + rawName);
                 }
                 String key = relative.toString().toLowerCase(Locale.ROOT);
                 if (!seen.add(key)) throw new IOException("duplicate archive entry " + rawName);
-                if (++files > SyncPackets.MAX_FILES) throw new IOException("too many skins");
+                if (!metadata && ++files > SyncPackets.MAX_FILES) throw new IOException("too many skins");
 
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 byte[] buffer = new byte[8192];
@@ -226,7 +229,15 @@ public final class ServerWardrobeSync implements AutoCloseable {
                 uncompressed += png.length;
                 if (uncompressed > SyncPackets.MAX_UNCOMPRESSED_BYTES) throw new IOException("wardrobe expands beyond its safety limit");
 
-                if (!isValidSkinPng(png)) {
+                if (metadata) {
+                    try {
+                        if (!JsonParser.parseString(new String(png, java.nio.charset.StandardCharsets.UTF_8)).isJsonObject()) {
+                            throw new IOException("wardrobe metadata is not a JSON object");
+                        }
+                    } catch (RuntimeException exception) {
+                        throw new IOException("wardrobe metadata is not valid JSON", exception);
+                    }
+                } else if (!isValidSkinPng(png)) {
                     throw new IOException(rawName + " is not a valid 64x64 PNG skin");
                 }
                 Path destination = staging.resolve(relative).normalize();
