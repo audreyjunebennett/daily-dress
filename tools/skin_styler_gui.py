@@ -99,9 +99,7 @@ class SkinStylerApp(tk.Tk):
         self.input_var = tk.StringVar(value=str(pictures / "Skins"))
         self.output_var = tk.StringVar(value=str(pictures / "Skins - Daily Dress Styled"))
         self.custom_eye_reference = Path(__file__).resolve().with_name("custom-eye-reference.png")
-        self.reference_var = tk.StringVar(
-            value=str(self.custom_eye_reference) if self.custom_eye_reference.is_file() else ""
-        )
+        self.reference_var = tk.StringVar(value="")
         self.hair_var = tk.StringVar(value=DEFAULT_HAIR_HUE_COLOR)
         self.hair_hue_var = tk.DoubleVar(value=hue_from_color(DEFAULT_HAIR_HUE_COLOR))
         self.hair_hue_text_var = tk.StringVar(value=f"{round(self.hair_hue_var.get())}°")
@@ -140,7 +138,7 @@ class SkinStylerApp(tk.Tk):
         self.eyes_over_bangs_var = tk.BooleanVar(value=True)
         self.preserve_hat_lashes_var = tk.BooleanVar(value=True)
         self.sync_var = tk.BooleanVar(value=self.sync_outbox is not None)
-        self.status_var = tk.StringVar(value="Choose reference eyes and the target hair color you want.")
+        self.status_var = tk.StringVar(value="Choose one reference skin to set the preview, hair color, and eyes together.")
         self.source_count_var = tk.StringVar(value="Choose a source wardrobe to begin")
         self.sample_position_var = tk.StringVar(value="No skin selected")
         self.current_status_var = tk.StringVar(value="Unsorted · Other")
@@ -198,14 +196,13 @@ class SkinStylerApp(tk.Tk):
         ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 18))
 
         self._path_row(frame, 2, "Source wardrobe", self.input_var, self._choose_input, folder=True)
-        ttk.Label(frame, text="Reference eyes").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Reference skin").grid(row=3, column=0, sticky="w", pady=5)
         reference_frame = ttk.Frame(frame)
         reference_frame.grid(row=3, column=1, columnspan=2, sticky="ew", pady=5)
         ttk.Entry(reference_frame, textvariable=self.reference_var).grid(row=0, column=0, sticky="ew", padx=(8, 8))
-        ttk.Button(reference_frame, text="Eyes below", command=lambda: self._show_workbench("eyes")).grid(row=0, column=1, sticky="ew", padx=(0, 7))
+        ttk.Button(reference_frame, text="Choose one skin", command=lambda: self._show_workbench("hair")).grid(row=0, column=1, sticky="ew", padx=(0, 7))
         ttk.Button(reference_frame, text="Browse…", command=self._choose_reference).grid(row=0, column=2, sticky="ew", padx=(0, 10))
-        ttk.Label(reference_frame, text="Full face is context; only eye pixels are copied.", foreground="#777777").grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(3, 0))
-        ttk.Button(reference_frame, text="Design below", command=lambda: self._show_workbench("eyes", "designer")).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(0, 10), pady=(3, 0))
+        ttk.Label(reference_frame, text="One skin sets the preview, starting hair color, and reference eyes.", foreground="#777777").grid(row=1, column=0, columnspan=3, sticky="w", padx=(8, 8), pady=(3, 0))
         preview_box = tk.Frame(reference_frame, width=66, height=66, background="#2B2B2B", relief="solid", borderwidth=1)
         preview_box.grid(row=0, column=3, rowspan=2, sticky="e")
         preview_box.grid_propagate(False)
@@ -220,7 +217,7 @@ class SkinStylerApp(tk.Tk):
         reference_frame.columnconfigure(0, weight=1)
         self._path_row(frame, 4, "New output folder", self.output_var, self._choose_output, folder=True)
 
-        ttk.Label(frame, text="3. TARGET HAIR COLOR", style="Step.TLabel").grid(row=5, column=0, sticky="nw", pady=(18, 4))
+        ttk.Label(frame, text="3. REFINE HAIR (OPTIONAL)", style="Step.TLabel").grid(row=5, column=0, sticky="nw", pady=(18, 4))
         color_frame = ttk.Frame(frame)
         color_frame.grid(row=5, column=1, columnspan=2, sticky="ew", pady=(14, 4))
         self.hair_swatch = tk.Label(color_frame, width=4, height=1, relief="solid", borderwidth=1, cursor="hand2")
@@ -262,44 +259,32 @@ class SkinStylerApp(tk.Tk):
 
         hair_reference_buttons = ttk.Frame(color_frame)
         hair_reference_buttons.grid(row=3, column=1, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(hair_reference_buttons, text="Hair library", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(side="left")
-        ttk.Button(hair_reference_buttons, text="Choose sample file…", command=self._choose_hair_sample).pack(side="left", padx=(7, 0))
-        ttk.Button(hair_reference_buttons, text="Exact pixel below", command=lambda: self._show_workbench("hair", "sampler")).pack(side="left", padx=(7, 0))
+        ttk.Button(hair_reference_buttons, text="Choose a different reference skin", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(side="left")
         ttk.Label(
             color_frame,
-            text="Gallery/sample sets both the visible reference and the starting color; sliders are for refinement.",
+            text="Choose one reference skin; adjust these color sliders only if you want to refine it.",
             style="Muted.TLabel",
         ).grid(row=4, column=1, columnspan=4, sticky="w", pady=(4, 0))
-        ttk.Checkbutton(
+        ttk.Label(
             color_frame,
-            text="Continue long hair down the torso/shoulders",
-            variable=self.body_hair_var,
+            text="Hair detection is automatic. If it guesses wrong, use Re-designate in the workbench.",
+            style="Muted.TLabel",
         ).grid(row=5, column=1, columnspan=4, sticky="w", pady=(4, 0))
         color_frame.columnconfigure(2, weight=1)
 
-        detection_label = ttk.Frame(frame)
-        detection_label.grid(row=6, column=0, sticky="w", pady=8)
-        ttk.Label(detection_label, text="Advanced hair detection").pack(anchor="w")
-        ttk.Checkbutton(detection_label, text="Auto-tune per skin", variable=self.adaptive_detection_var).pack(anchor="w")
-        self._history_scale(frame, from_=18, to=85, variable=self.tolerance_var, orient="horizontal").grid(row=6, column=1, sticky="ew", pady=8)
-        hair_tolerance_controls = ttk.Frame(frame)
-        hair_tolerance_controls.grid(row=6, column=2, sticky="w")
-        ttk.Label(hair_tolerance_controls, textvariable=self.tolerance_text_var, width=3).pack(side="left")
-        ttk.Button(hair_tolerance_controls, text="Reset to 42", command=self._reset_hair_tolerance).pack(side="left", padx=(4, 0))
-
         eye_options = ttk.Frame(frame)
         eye_options.grid(row=7, column=1, columnspan=2, sticky="w", pady=(10, 2))
-        ttk.Checkbutton(eye_options, text="Match eyes from the reference skin", variable=self.face_var).pack(side="left")
+        ttk.Checkbutton(eye_options, text="Match eyes from the reference skin", variable=self.face_var).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(
             eye_options,
             text="Show eyes / eyeliner over bangs (base face layer only)",
             variable=self.eyes_over_bangs_var,
-        ).pack(side="left", padx=(18, 0))
+        ).grid(row=0, column=1, sticky="w", padx=(18, 0))
         ttk.Checkbutton(
             eye_options,
             text="Keep existing 3D hat-layer lashes",
             variable=self.preserve_hat_lashes_var,
-        ).pack(side="left", padx=(18, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
         ttk.Checkbutton(frame, text="Adjust exposed skin tone too", variable=self.skin_enabled_var).grid(row=8, column=0, sticky="w", pady=(8, 2))
         skin_frame = ttk.Frame(frame)
@@ -311,15 +296,16 @@ class SkinStylerApp(tk.Tk):
         ttk.Button(skin_frame, text="Choose skin tone…", command=self._choose_skin_color).pack(side="left", padx=8)
         ttk.Button(skin_frame, text="Sample selected skin", command=self._sample_current_skin_tone).pack(side="left")
 
-        ttk.Label(frame, text="Advanced skin detection").grid(row=9, column=0, sticky="w", pady=8)
-        self._history_scale(frame, from_=10, to=46, variable=self.skin_tolerance_var, orient="horizontal").grid(row=9, column=1, sticky="ew", pady=8)
-        skin_tolerance_controls = ttk.Frame(frame)
-        skin_tolerance_controls.grid(row=9, column=2, sticky="w")
-        ttk.Label(skin_tolerance_controls, textvariable=self.skin_tolerance_text_var, width=3).pack(side="left")
-        ttk.Button(skin_tolerance_controls, text="Reset to 24", command=self._reset_skin_tolerance).pack(side="left", padx=(4, 0))
-
-        palette_frame = ttk.LabelFrame(frame, text="Optional outfit + hair-accessory palettes", padding=8)
-        palette_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(12, 2))
+        palette_section = ttk.Frame(frame)
+        palette_section.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(10, 2))
+        self.palette_toggle = ttk.Button(
+            palette_section,
+            text="Optional outfit + accessory colors  ▸",
+            command=self._toggle_palette_options,
+        )
+        self.palette_toggle.pack(anchor="w")
+        palette_frame = ttk.LabelFrame(palette_section, text="Optional outfit + hair-accessory palettes", padding=8)
+        self.palette_frame = palette_frame
 
         def palette_row(
             row: int,
@@ -414,8 +400,8 @@ class SkinStylerApp(tk.Tk):
         self.install_button.pack(side="left", padx=10)
         self.generate_button = ttk.Button(button_frame, text="Generate only", command=lambda: self._generate(False))
         self.generate_button.pack(side="left")
-        ttk.Button(button_frame, text="Undo slider (Ctrl+Z)", command=self._undo_sliders).pack(side="right")
-        ttk.Button(button_frame, text="Redo slider (Ctrl+Y)", command=self._redo_sliders).pack(side="right", padx=(0, 7))
+        ttk.Button(button_frame, text="Undo color (Ctrl+Z)", command=self._undo_sliders).pack(side="right")
+        ttk.Button(button_frame, text="Redo color (Ctrl+Y)", command=self._redo_sliders).pack(side="right", padx=(0, 7))
 
         self.progress = ttk.Progressbar(frame, mode="determinate")
         self.progress.grid(row=13, column=0, columnspan=3, sticky="ew")
@@ -423,12 +409,12 @@ class SkinStylerApp(tk.Tk):
 
         self._build_workspace(frame)
         frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(3, minsize=455)
+        frame.columnconfigure(3, minsize=560)
 
     def _build_workspace(self, frame: ttk.Frame) -> None:
         workspace = ttk.LabelFrame(frame, text="2. ORGANIZE + LIVE PREVIEW", padding=10)
         workspace.grid(row=2, column=3, rowspan=13, sticky="nsew", padx=(18, 0))
-        ttk.Label(workspace, textvariable=self.source_count_var, style="Count.TLabel", wraplength=420).pack(fill="x")
+        ttk.Label(workspace, textvariable=self.source_count_var, style="Count.TLabel", wraplength=530).pack(fill="x")
 
         filter_row = ttk.Frame(workspace)
         filter_row.pack(fill="x", pady=(7, 5))
@@ -450,10 +436,13 @@ class SkinStylerApp(tk.Tk):
             width=20,
         ).pack(side="right", fill="x", expand=True, padx=(8, 0))
 
+        self.preview_area = ttk.Frame(workspace)
+        self.preview_area.pack(fill="x")
+
         preview_box = tk.Frame(
-            workspace,
-            width=425,
-            height=310,
+            self.preview_area,
+            width=530,
+            height=250,
             background=COLORS["slot"],
             highlightthickness=3,
             highlightbackground=COLORS["stone_dark"],
@@ -471,15 +460,15 @@ class SkinStylerApp(tk.Tk):
         self.hair_preview.bind("<ButtonPress-1>", self._begin_live_preview_drag)
         self.hair_preview.bind("<B1-Motion>", self._drag_live_preview)
 
-        ttk.Label(workspace, textvariable=self.sample_position_var, anchor="center").pack(fill="x")
-        ttk.Label(workspace, textvariable=self.current_status_var, style="Muted.TLabel", anchor="center").pack(fill="x")
-        nav = ttk.Frame(workspace)
+        ttk.Label(self.preview_area, textvariable=self.sample_position_var, anchor="center").pack(fill="x")
+        ttk.Label(self.preview_area, textvariable=self.current_status_var, style="Muted.TLabel", anchor="center").pack(fill="x")
+        nav = ttk.Frame(self.preview_area)
         nav.pack(fill="x", pady=(5, 7))
         ttk.Button(nav, text="◀ Previous", command=lambda: self._cycle_sample(-1)).pack(side="left")
         ttk.Button(nav, text="Next ▶", command=lambda: self._cycle_sample(1)).pack(side="right")
-        ttk.Button(nav, text="Browse hair below", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(expand=True)
+        ttk.Button(nav, text="Choose reference", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(expand=True)
 
-        model_row = ttk.Frame(workspace)
+        model_row = ttk.Frame(self.preview_area)
         model_row.pack(fill="x", pady=(0, 7))
         ttk.Label(model_row, text="Arm model").pack(side="left")
         model_box = ttk.Combobox(
@@ -492,20 +481,20 @@ class SkinStylerApp(tk.Tk):
         model_box.pack(side="right")
         model_box.bind("<<ComboboxSelected>>", lambda _event: self._set_current_model())
         ttk.Checkbutton(
-            workspace,
+            self.preview_area,
             text="Hood / helmet: no visible hair on this skin",
             variable=self.no_visible_hair_var,
             command=self._set_current_hair_mode,
         ).pack(anchor="w", pady=(0, 7))
 
-        decisions = ttk.Frame(workspace)
+        decisions = ttk.Frame(self.preview_area)
         decisions.pack(fill="x", pady=(0, 6))
         ttk.Button(decisions, text="♥ Favorite", command=lambda: self._set_current_status("favorite"), style="Rose.TButton").pack(side="left", fill="x", expand=True)
         ttk.Button(decisions, text="? Maybe", command=lambda: self._set_current_status("maybe")).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(decisions, text="Unsorted", command=lambda: self._set_current_status("unsorted")).pack(side="left", fill="x", expand=True)
         ttk.Button(decisions, text="Remove", command=lambda: self._set_current_status("remove"), style="Danger.TButton").pack(side="left", fill="x", expand=True, padx=(4, 0))
 
-        categories = ttk.Frame(workspace)
+        categories = ttk.Frame(self.preview_area)
         categories.pack(fill="x", pady=(0, 7))
         ttk.Label(categories, text="Category").pack(side="left")
         tag_box = ttk.Combobox(
@@ -517,13 +506,14 @@ class SkinStylerApp(tk.Tk):
         )
         tag_box.pack(side="left", padx=(7, 5))
         tag_box.bind("<<ComboboxSelected>>", lambda _event: self._set_current_tag())
-        ttk.Button(categories, text="Fix pixels below", command=lambda: self._show_workbench("pixels"), style="Accent.TButton").pack(side="right")
+        ttk.Button(categories, text="Re-designate pixels", command=lambda: self._show_workbench("pixels"), style="Accent.TButton").pack(side="right")
 
-        ttk.Label(
+        self.workbench_heading = ttk.Label(
             workspace,
             text="ALL-IN-ONE WORKBENCH · switch tools without opening another window",
             style="Step.TLabel",
-        ).pack(fill="x", pady=(2, 3))
+        )
+        self.workbench_heading.pack(fill="x", pady=(2, 3))
         self.workbench = IntegratedWorkbench(workspace, self)
         self.workbench.pack(fill="both", expand=True)
 
@@ -537,6 +527,16 @@ class SkinStylerApp(tk.Tk):
             scale.bind(f"<KeyPress-{key}>", self._begin_slider_gesture)
             scale.bind(f"<KeyRelease-{key}>", self._finish_slider_gesture)
         return scale
+
+    def _toggle_palette_options(self) -> None:
+        """Keep secondary recoloring controls out of the everyday workflow."""
+
+        if self.palette_frame.winfo_manager():
+            self.palette_frame.pack_forget()
+            self.palette_toggle.configure(text="Optional outfit + accessory colors  ▸")
+        else:
+            self.palette_frame.pack(fill="x", pady=(6, 0))
+            self.palette_toggle.configure(text="Optional outfit + accessory colors  ▾")
 
     def _slider_variables(self) -> dict[str, tk.DoubleVar]:
         return {
@@ -629,12 +629,24 @@ class SkinStylerApp(tk.Tk):
             filetypes=(("Minecraft skin PNG", "*.png"), ("All files", "*.*")),
         )
         if selected:
-            self.reference_var.set(selected)
+            self._use_complete_reference(Path(selected))
 
     def _use_face_reference(self, path: Path) -> None:
         self.reference_var.set(str(path))
         label = "Custom eyes designed" if path.resolve() == self.custom_eye_reference.resolve() else "Reference eyes selected"
         self.status_var.set(f"{label}: {path.name}")
+
+    def _use_complete_reference(self, path: Path) -> None:
+        """Use one skin as the starting point for preview, hair color, and eyes."""
+
+        if not self._load_hair_sample(path):
+            messagebox.showerror("Could not use reference", f"That file is not a usable Minecraft skin:\n{path}")
+            return
+        self._sample_reference_color(self._hair_sample_image)
+        self.reference_var.set(str(path))
+        self.status_var.set(f"Reference ready from {path.name}: preview, hair color, and eyes are all set.")
+        self._refresh_hair_preview()
+        self._schedule_strip_refresh()
 
     def _show_workbench(self, mode: str, subview: str = "gallery") -> None:
         """Bring one of the embedded tools into view without opening a window."""
@@ -645,11 +657,26 @@ class SkinStylerApp(tk.Tk):
         self.workbench.stage.focus_set()
         labels = {
             "wardrobe": "Wardrobe library",
-            "hair": "Hair library",
+            "hair": "Reference-skin library",
             "eyes": "Eye library",
-            "pixels": "Pixel-category editor",
+            "pixels": "Re-designate materials",
         }
-        self.status_var.set(f"{labels.get(mode, 'Workbench')} is open below the live 3D preview.")
+        if mode == "pixels":
+            self.status_var.set("Re-designate is in focus: choose the correct material, then paint the texture.")
+        else:
+            self.status_var.set(f"{labels.get(mode, 'Workbench')} is open below the live 3D preview.")
+
+    def _set_re_designate_focus(self, focused: bool) -> None:
+        """Give material correction the full right panel instead of a corner."""
+
+        if focused:
+            if self.preview_area.winfo_manager():
+                self.preview_area.pack_forget()
+            self.workbench_heading.configure(text="RE-DESIGNATE MATERIALS · large focus workspace")
+        else:
+            if not self.preview_area.winfo_manager():
+                self.preview_area.pack(fill="x", before=self.workbench_heading)
+            self.workbench_heading.configure(text="ALL-IN-ONE WORKBENCH · choose a tool below")
 
     def _refresh_reference_preview(self, *_args) -> None:
         value = self.reference_var.get().strip()
@@ -981,20 +1008,20 @@ class SkinStylerApp(tk.Tk):
         try:
             styled = self._style_preview_image(self._hair_sample_image, self._hair_sample_path)
             slim = self._current_model_is_slim(self._hair_sample_image, self._hair_sample_path)
-            before = render_player_3d(self._hair_sample_image, 7, slim=slim, yaw_degrees=self._preview_yaw)
-            after = render_player_3d(styled, 7, slim=slim, yaw_degrees=self._preview_yaw)
-            comparison = Image.new("RGBA", (420, 300), (30, 37, 41, 255))
-            before_x = 110 - before.width // 2
-            after_x = 310 - after.width // 2
-            model_y = max(34, (300 - before.height) // 2 + 11)
+            before = render_player_3d(self._hair_sample_image, 6, slim=slim, yaw_degrees=self._preview_yaw)
+            after = render_player_3d(styled, 6, slim=slim, yaw_degrees=self._preview_yaw)
+            comparison = Image.new("RGBA", (526, 240), (30, 37, 41, 255))
+            before_x = 140 - before.width // 2
+            after_x = 386 - after.width // 2
+            model_y = max(27, (240 - before.height) // 2 + 8)
             comparison.alpha_composite(before, (before_x, model_y))
             comparison.alpha_composite(after, (after_x, model_y))
             draw = ImageDraw.Draw(comparison)
-            draw.text((110, 16), "ORIGINAL", fill=(200, 191, 167, 255), anchor="mm")
-            draw.text((310, 16), "STYLED", fill=(244, 201, 93, 255), anchor="mm")
-            draw.line((195, 150, 217, 150), fill=(217, 122, 174, 255), width=4)
-            draw.polygon(((217, 141), (232, 150), (217, 159)), fill=(217, 122, 174, 255))
-            draw.text((210, 284), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
+            draw.text((140, 14), "ORIGINAL", fill=(200, 191, 167, 255), anchor="mm")
+            draw.text((386, 14), "STYLED", fill=(244, 201, 93, 255), anchor="mm")
+            draw.line((246, 120, 268, 120), fill=(217, 122, 174, 255), width=4)
+            draw.polygon(((268, 111), (283, 120), (268, 129)), fill=(217, 122, 174, 255))
+            draw.text((263, 228), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
             self._hair_preview_image = ImageTk.PhotoImage(comparison)
             self.hair_preview.configure(image=self._hair_preview_image, text="")
             self._refresh_current_metadata()

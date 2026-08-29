@@ -17,17 +17,15 @@ THE NEW WORKBENCH FLOW
    immediately, and each decision moves to the next skin.
 3. Use the Working set menu for all kept skins, favorites, a category, or a
    favorite + category combination. Removed skins are not generated.
-4. The large original-to-styled 3D viewer updates for the selected skin. Drag
-   left/right to rotate. Switch the lower panel between Wardrobe, Hair, Eyes,
-   and Pixels without losing the live preview.
-5. Hair contains the complete hairstyle library plus an exact-pixel sampler.
-   Choose still opens a normal color dialog; Hue/Saturation/Lightness refine.
-6. Eyes contains the complete face library and custom eye pixel designer in
-   the same panel. "Sample selected skin" can set exposed-skin tone.
-7. Auto-tune per skin is the recommended detection default. For edge cases,
-   switch to Pixels and paint only incorrect Hair, Skin, Outfit, Accessory,
-   Eyes, or Ignore pixels. Right-click restores auto-detection, and edits save
-   automatically.
+4. Choose one Reference skin. That one click sets the preview, starting hair
+   color, and reference eyes together. Refine colors or eyes only if wanted.
+5. Switch the lower panel between Wardrobe, Reference, Eyes, and Re-designate.
+   Hair/material detection is automatic; there is no detection slider.
+6. Re-designate takes over the right panel with a large texture. Paint only
+   incorrect Hair, Skin, Outfit, Accessory, Eyes, or Ignore pixels. Right-click
+   restores auto-detection, and edits save automatically.
+7. Reference also contains an exact-pixel hair-color sampler for unusual
+   palettes. "Sample selected skin" can set exposed-skin tone.
    For a hood or helmet with no visible hair, use the dedicated checkbox.
 8. Arm model defaults to automatic per-skin detection; Slim and Classic are
    available as saved overrides for mixed-format wardrobes.

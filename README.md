@@ -39,14 +39,14 @@ Run `tools/Open Daily Dress Skin Styler.bat`. The main workbench now combines th
 2. Use the full searchable, filterable wardrobe library directly below the live preview. There are no
    quick picks or separate gallery windows. Favorite/Maybe/Remove/Unsorted and outfit categories save
    as lightweight metadata; originals are not moved, copied, renamed, or edited.
-3. Switch the embedded workbench between **Wardrobe**, **Hair**, **Eyes**, and **Pixels**. The same large
-   original → styled 3D viewer remains visible while the lower tool changes.
-4. In Hair mode, choose any hairstyle and detected starting color, or switch the same panel to its exact
-   source-pixel sampler. Hue, saturation, and lightness sliders remain refinement tools.
-5. In Eyes mode, choose any face or switch the same panel to the custom eye pixel designer. A selected
-   skin can also supply the target exposed-skin tone.
-6. In Pixels mode, paint sparse Hair/Skin/Outfit/Accessory/Eyes/Ignore corrections inline. They save
-   automatically. Hooded or helmeted skins can be marked as having no visible hair with one click.
+3. Choose **one reference skin**. That one click sets the preview skin, starting hair color, and reference
+   eyes together. Hair color and the Eyes editor remain available only when you want to refine the result.
+4. Switch the embedded workbench between **Wardrobe**, **Reference**, **Eyes**, and **Re-designate**.
+   Hair/material detection is automatic; there is no normal detection slider to manage.
+5. If automatic detection gets a material wrong, Re-designate enters a large focused texture view. Paint
+   only the incorrect Hair/Skin/Outfit/Accessory/Eyes/Ignore pixels; corrections save automatically.
+6. Hooded or helmeted skins can be marked as having no visible hair with one click. An exact source-pixel
+   hair-color sampler remains available from Reference for unusual palettes.
 7. Optionally recolor outfit and hair-accessory palettes. Hue rotation preserves each material's
    relative color and shading relationships instead of flattening multicolor designs.
 8. Inspect every skin through the embedded library and live 3D view, generate one flat output folder,

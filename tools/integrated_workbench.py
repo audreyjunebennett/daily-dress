@@ -99,9 +99,9 @@ class IntegratedWorkbench(ttk.Frame):
         modes.pack(fill="x", pady=(1, 5))
         for mode, label in (
             ("wardrobe", "WARDROBE"),
-            ("hair", "HAIR"),
+            ("hair", "REFERENCE"),
             ("eyes", "EYES"),
-            ("pixels", "PIXELS"),
+            ("pixels", "RE-DESIGNATE"),
         ):
             button = tk.Button(
                 modes,
@@ -118,22 +118,23 @@ class IntegratedWorkbench(ttk.Frame):
             button.pack(side="left", fill="x", expand=True, padx=(0 if not self._mode_buttons else 3, 0))
             self._mode_buttons[mode] = button
 
-        search = ttk.Frame(self)
-        search.pack(fill="x", pady=(0, 5))
-        ttk.Label(search, text="Find").pack(side="left")
-        self.search_entry = ttk.Entry(search, textvariable=self.search_var, width=14)
+        self.search_row = ttk.Frame(self)
+        self.search_row.pack(fill="x", pady=(0, 5))
+        ttk.Label(self.search_row, text="Find").pack(side="left")
+        self.search_entry = ttk.Entry(self.search_row, textvariable=self.search_var, width=14)
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(5, 5))
         self.filter_box = ttk.Combobox(
-            search,
+            self.search_row,
             textvariable=self.filter_var,
             values=LIBRARY_FILTERS,
             state="readonly",
             width=18,
         )
         self.filter_box.pack(side="right")
-        ttk.Label(self, textvariable=self.count_var, style="Muted.TLabel").pack(fill="x", pady=(0, 3))
+        self.count_label = ttk.Label(self, textvariable=self.count_var, style="Muted.TLabel")
+        self.count_label.pack(fill="x", pady=(0, 3))
 
-        self.stage = tk.Frame(self, background=COLORS["slot"], height=150)
+        self.stage = tk.Frame(self, background=COLORS["slot"], height=210)
         self.stage.pack(fill="both", expand=True)
         self.stage.pack_propagate(False)
         self._paint_mode_buttons()
@@ -143,11 +144,18 @@ class IntegratedWorkbench(ttk.Frame):
             return
         self.mode = mode
         self.subview = subview
+        self.app._set_re_designate_focus(mode == "pixels")
         self._paint_mode_buttons()
         gallery_controls = mode != "pixels" and subview == "gallery"
-        state = "normal" if gallery_controls else "disabled"
-        self.search_entry.configure(state=state)
-        self.filter_box.configure(state="readonly" if gallery_controls else "disabled")
+        if gallery_controls:
+            if not self.search_row.winfo_manager():
+                self.search_row.pack(fill="x", pady=(0, 5), before=self.count_label)
+            self.search_entry.configure(state="normal")
+            self.filter_box.configure(state="readonly")
+            self.stage.configure(height=210)
+        else:
+            self.search_row.pack_forget()
+            self.stage.configure(height=620 if mode == "pixels" else 245)
         self.invalidate()
 
     def _paint_mode_buttons(self) -> None:
@@ -251,7 +259,7 @@ class IntegratedWorkbench(ttk.Frame):
         visible = self._visible_paths()
         instructions = {
             "wardrobe": "Every skin is here · click one to preview, then sort it above",
-            "hair": "Click any hairstyle to use its detected hair color",
+            "hair": "Pick ONE skin · it sets the preview, starting hair color, and eyes together",
             "eyes": "Click any face to use its eyes as the reference",
         }[self.mode]
         header = ttk.Frame(self.stage, padding=(5, 4, 5, 2))
@@ -260,7 +268,7 @@ class IntegratedWorkbench(ttk.Frame):
         if self.mode == "hair":
             ttk.Button(
                 header,
-                text="Exact pixel",
+                text="Adjust exact hair color",
                 command=lambda: self.set_mode("hair", subview="sampler"),
                 style="Accent.TButton",
             ).pack(side="right")
@@ -299,7 +307,7 @@ class IntegratedWorkbench(ttk.Frame):
                 highlightthickness=3 if selected or eye_selected else 1,
                 highlightbackground=COLORS["water"] if eye_selected else (COLORS["gold"] if selected else COLORS["stone_dark"]),
             )
-            card.grid(row=index // 4, column=index % 4, padx=4, pady=4, sticky="n")
+            card.grid(row=index // 5, column=index % 5, padx=4, pady=4, sticky="n")
             card.grid_propagate(False)
             photo = self._thumbnail(path, self.mode)
             button = tk.Button(
@@ -337,7 +345,7 @@ class IntegratedWorkbench(ttk.Frame):
             for widget in (card, label, footer):
                 widget.bind("<Button-1>", lambda _event, chosen=path: self._choose_gallery_item(chosen))
                 widget.bind("<MouseWheel>", self._scroll_gallery)
-        for column in range(4):
+        for column in range(5):
             gallery.columnconfigure(column, weight=1)
         self.count_var.set(f"{len(visible)} of {len(self.app._sample_paths)} skins shown · scroll for the full library")
         self.after_idle(lambda: self.gallery_canvas.yview_moveto(self._scroll_fraction))
@@ -390,11 +398,7 @@ class IntegratedWorkbench(ttk.Frame):
 
     def _choose_gallery_item(self, path: Path) -> None:
         if self.mode == "hair":
-            color = self._hair_color(path)
-            if color is None:
-                self.app.status_var.set(f"{path.name} has little or no visible hair to sample.")
-                return
-            self.app._use_hair_reference(path, color)
+            self.app._use_complete_reference(path)
         else:
             self.app._load_hair_sample(path)
             if self.mode == "eyes":
@@ -412,7 +416,7 @@ class IntegratedWorkbench(ttk.Frame):
         if self.app._hair_sample_path is None or self.app._hair_sample_image is None:
             ttk.Label(self.stage, text="Choose a skin in the Hair library first.").pack(pady=50)
             return
-        scale = 2
+        scale = 3
         photo = ImageTk.PhotoImage(self.app._hair_sample_image.resize((64 * scale, 64 * scale), Image.Resampling.NEAREST))
         self._photos.append(photo)
         canvas = tk.Canvas(
@@ -442,7 +446,7 @@ class IntegratedWorkbench(ttk.Frame):
 
     def _build_pixel_editor(self) -> None:
         self._clear_stage()
-        self.count_var.set("Pixel categories · paint only what auto-detection got wrong")
+        self.count_var.set("RE-DESIGNATE MATERIALS · paint only what automatic detection got wrong")
         if self.app._hair_sample_path is None or self.app._hair_sample_image is None or self.app._picker_state is None:
             ttk.Label(self.stage, text="Choose a wardrobe skin before correcting pixels.").pack(pady=60)
             return
@@ -462,7 +466,7 @@ class IntegratedWorkbench(ttk.Frame):
 
         body = ttk.Frame(self.stage, padding=4)
         body.pack(fill="both", expand=True)
-        scale = 2
+        scale = 6
         self.pixel_canvas = tk.Canvas(
             body,
             width=64 * scale,
@@ -472,7 +476,6 @@ class IntegratedWorkbench(ttk.Frame):
             highlightbackground=COLORS["stone_dark"],
             cursor="crosshair",
         )
-        self.pixel_canvas.pack(side="left")
         self.pixel_canvas.bind("<ButtonPress-1>", lambda event: self._pixel_paint(event, scale))
         self.pixel_canvas.bind("<B1-Motion>", lambda event: self._pixel_paint(event, scale))
         self.pixel_canvas.bind("<ButtonRelease-1>", lambda _event: self._save_pixels())
@@ -480,9 +483,8 @@ class IntegratedWorkbench(ttk.Frame):
         self.pixel_canvas.bind("<B3-Motion>", lambda event: self._pixel_erase(event, scale))
         self.pixel_canvas.bind("<ButtonRelease-3>", lambda _event: self._save_pixels())
 
-        tools = ttk.Frame(body, padding=(8, 0, 0, 0), width=270)
-        tools.pack(side="left", fill="both", expand=True)
-        tools.grid_propagate(False)
+        tools = ttk.Frame(body, padding=(4, 0, 4, 0))
+        tools.pack(side="top", fill="x")
         for index, (category, label) in enumerate((
             ("hair", "Hair"),
             ("skin", "Skin"),
@@ -501,6 +503,7 @@ class IntegratedWorkbench(ttk.Frame):
         ttk.Label(tools, text="Left paints · right restores auto\nSaved automatically", style="Muted.TLabel").grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(3, 0)
         )
+        self.pixel_canvas.pack(side="top", pady=(8, 0))
         self._redraw_pixels(scale)
 
     def _pixel_map(self) -> dict[tuple[int, int], str]:
@@ -512,7 +515,7 @@ class IntegratedWorkbench(ttk.Frame):
         result.update(self._pixel_corrections)
         return result
 
-    def _redraw_pixels(self, scale: int = 2) -> None:
+    def _redraw_pixels(self, scale: int = 6) -> None:
         if self._pixel_skin is None or not hasattr(self, "pixel_canvas"):
             return
         overlay = Image.new("RGBA", self._pixel_skin.size, (0, 0, 0, 0))
@@ -622,7 +625,7 @@ class IntegratedWorkbench(ttk.Frame):
         self.count_var.set("Custom eye designer · edit here, preview in the 3D view above")
         body = ttk.Frame(self.stage, padding=4)
         body.pack(fill="both", expand=True)
-        scale = 17
+        scale = 23
         self.eye_canvas = tk.Canvas(
             body,
             width=8 * scale,
@@ -663,7 +666,7 @@ class IntegratedWorkbench(ttk.Frame):
         ttk.Button(action, text="Use eyes", command=self._save_eye_design, style="Rose.TButton").pack(side="right")
         self._redraw_eyes(scale)
 
-    def _redraw_eyes(self, scale: int = 17) -> None:
+    def _redraw_eyes(self, scale: int = 23) -> None:
         if not hasattr(self, "eye_canvas"):
             return
         self.eye_canvas.delete("all")
