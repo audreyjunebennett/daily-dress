@@ -19,6 +19,7 @@ public final class DailyDressState {
 
     public Map<String, CachedSkin> skinCache = new HashMap<>();
     public Map<String, String> lastOutfit = new HashMap<>();
+    public Map<String, OutfitHistory> outfitHistories = new HashMap<>();
     public Map<String, String> activeBatches = new HashMap<>();
     public Map<String, Map<String, FlaggedOutfit>> flaggedOutfits = new HashMap<>();
 
@@ -89,10 +90,26 @@ public final class DailyDressState {
         }
     }
 
+    public synchronized OutfitHistory outfitHistory(String playerKey) {
+        sanitize();
+        return outfitHistories.computeIfAbsent(playerKey, ignored -> new OutfitHistory());
+    }
+
     private void sanitize() {
         if (skinCache == null) skinCache = new HashMap<>();
         if (lastOutfit == null) lastOutfit = new HashMap<>();
+        if (outfitHistories == null) outfitHistories = new HashMap<>();
         if (activeBatches == null) activeBatches = new HashMap<>();
         if (flaggedOutfits == null) flaggedOutfits = new HashMap<>();
+
+        outfitHistories.entrySet().removeIf(entry -> entry.getKey() == null || entry.getValue() == null);
+        outfitHistories.values().forEach(OutfitHistory::sanitize);
+        lastOutfit.forEach((playerKey, outfitId) -> {
+            if (playerKey == null || outfitId == null || outfitId.isBlank()) return;
+            OutfitHistory history = outfitHistories.computeIfAbsent(playerKey, ignored -> new OutfitHistory());
+            if (history.current().isEmpty()) history.record(outfitId);
+        });
+        outfitHistories.forEach((playerKey, history) -> history.current()
+                .ifPresent(outfitId -> lastOutfit.put(playerKey, outfitId)));
     }
 }

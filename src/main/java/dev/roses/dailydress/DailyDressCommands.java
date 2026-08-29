@@ -31,6 +31,7 @@ public final class DailyDressCommands {
                 .then(Commands.literal("on").executes(context -> setEnabled(context.getSource(), true)))
                 .then(Commands.literal("off").executes(context -> setEnabled(context.getSource(), false)))
                 .then(Commands.literal("next").executes(context -> next(context.getSource())))
+                .then(Commands.literal("previous").executes(context -> previous(context.getSource())))
                 .then(Commands.literal("batch")
                         .executes(context -> batchStatus(context.getSource()))
                         .then(Commands.argument("filter", StringArgumentType.word())
@@ -65,8 +66,13 @@ public final class DailyDressCommands {
 
     private int next(CommandSourceStack source) throws CommandSyntaxException {
         ServerPlayer player = source.getPlayerOrException();
-        wardrobe.dressNow(player, false);
+        wardrobe.dressNext(player);
         return 1;
+    }
+
+    private int previous(CommandSourceStack source) throws CommandSyntaxException {
+        ServerPlayer player = source.getPlayerOrException();
+        return wardrobe.dressPrevious(player) ? 1 : 0;
     }
 
     private int flag(CommandSourceStack source, String note) throws CommandSyntaxException {

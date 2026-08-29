@@ -70,11 +70,30 @@ public final class WardrobeService implements AutoCloseable {
 
     public void dressAfterSleep(ServerPlayer player) {
         if (owner.config().isEnabled(player.getUUID())) {
-            dressNow(player, true);
+            dressRandom(player, true);
         }
     }
 
     public void dressNow(ServerPlayer player, boolean afterSleep) {
+        dressRandom(player, afterSleep);
+    }
+
+    public void dressNext(ServerPlayer player) {
+        if (!dressFromHistory(player, true)) {
+            dressRandom(player, false);
+        }
+    }
+
+    public boolean dressPrevious(ServerPlayer player) {
+        if (dressFromHistory(player, false)) return true;
+        player.sendSystemMessage(styled(
+                "No previous Daily Dress outfit is still available.",
+                ChatFormatting.GRAY
+        ));
+        return false;
+    }
+
+    private void dressRandom(ServerPlayer player, boolean afterSleep) {
         List<Path> choices = findSkins(player);
         if (choices.isEmpty()) {
             String batch = activeBatch(player);
@@ -94,22 +113,52 @@ public final class WardrobeService implements AutoCloseable {
             return;
         }
 
-        String playerKey = player.getUUID().toString();
-        String previous = state.lastOutfit.get(playerKey);
-        if (owner.config().avoidImmediateRepeats && choices.size() > 1 && previous != null) {
-            choices.removeIf(path -> outfitId(path).equals(previous));
+        String current = currentOutfit(player);
+        if (current != null) {
+            choices.removeIf(path -> outfitId(path).equals(current));
+        }
+        if (choices.isEmpty()) {
+            player.sendSystemMessage(styled(
+                    "Daily Dress could not find a different eligible outfit.",
+                    ChatFormatting.GRAY
+            ));
+            return;
         }
 
         Path chosen = choices.get(ThreadLocalRandom.current().nextInt(choices.size()));
-        apply(player, chosen, afterSleep);
+        apply(player, chosen, afterSleep, HistoryUpdate.record());
+    }
+
+    private boolean dressFromHistory(ServerPlayer player, boolean forward) {
+        List<Path> choices = findSkins(player, "all");
+        choices.removeIf(path -> isFlaggedVersion(player, path));
+
+        Map<String, Path> pathsById = new java.util.LinkedHashMap<>();
+        choices.forEach(path -> pathsById.put(outfitId(path), path));
+        String current = currentOutfit(player);
+        if (current != null) pathsById.remove(current);
+
+        OutfitHistory history = state.outfitHistory(player.getUUID().toString());
+        Optional<OutfitHistory.Selection> selection = forward
+                ? history.nextAvailable(pathsById.keySet())
+                : history.previousAvailable(pathsById.keySet());
+        if (selection.isEmpty()) return false;
+
+        Path chosen = pathsById.get(selection.get().outfitId());
+        if (chosen == null) return false;
+        HistoryUpdate update = forward
+                ? HistoryUpdate.forward(selection.get())
+                : HistoryUpdate.previous(selection.get());
+        apply(player, chosen, false, update);
+        return true;
     }
 
     public Optional<String> flagCurrentAndDressNext(ServerPlayer player, String note) {
         String playerKey = player.getUUID().toString();
-        String currentId = state.lastOutfit.get(playerKey);
+        String currentId = currentOutfit(player);
         if (currentId == null || currentId.isBlank()) return Optional.empty();
 
-        Optional<Path> currentPath = findSkins(player).stream()
+        Optional<Path> currentPath = findSkins(player, "all").stream()
                 .filter(path -> outfitId(path).equals(currentId))
                 .findFirst();
         if (currentPath.isEmpty()) return Optional.empty();
@@ -141,7 +190,7 @@ public final class WardrobeService implements AutoCloseable {
         state.saveFlagReport(flagReportPath, DailyDress.LOGGER);
         String name = displayName(path);
         DailyDress.LOGGER.info("{} flagged Daily Dress outfit {} ({})", player.getGameProfile().name(), currentId, cleanedNote);
-        dressNow(player, false);
+        dressRandom(player, false);
         return Optional.of(name);
     }
 
@@ -338,7 +387,7 @@ public final class WardrobeService implements AutoCloseable {
         }
     }
 
-    private void apply(ServerPlayer player, Path chosen, boolean afterSleep) {
+    private void apply(ServerPlayer player, Path chosen, boolean afterSleep, HistoryUpdate historyUpdate) {
         final String cacheKey;
         final boolean slimModel = isSlimModel(chosen);
         try {
@@ -350,7 +399,7 @@ public final class WardrobeService implements AutoCloseable {
 
         DailyDressState.CachedSkin cached = state.skinCache.get(cacheKey);
         if (cached != null) {
-            setSkin(player, chosen, new Property(TailoredPlayer.PROPERTY_TEXTURES, cached.value(), cached.signature()), afterSleep);
+            setSkin(player, chosen, new Property(TailoredPlayer.PROPERTY_TEXTURES, cached.value(), cached.signature()), afterSleep, historyUpdate);
             return;
         }
 
@@ -378,17 +427,34 @@ public final class WardrobeService implements AutoCloseable {
 
                 Property property = skin.get();
                 state.skinCache.put(cacheKey, new DailyDressState.CachedSkin(property.value(), property.signature()));
-                setSkin(current, chosen, property, afterSleep);
+                setSkin(current, chosen, property, afterSleep, historyUpdate);
             });
         });
     }
 
-    private void setSkin(ServerPlayer player, Path chosen, Property property, boolean afterSleep) {
+    private void setSkin(
+            ServerPlayer player,
+            Path chosen,
+            Property property,
+            boolean afterSleep,
+            HistoryUpdate historyUpdate
+    ) {
         try {
             ((TailoredPlayer) player).fabrictailor_setSkin(property, true);
-            state.lastOutfit.put(player.getUUID().toString(), outfitId(chosen));
+            String playerKey = player.getUUID().toString();
+            String chosenId = outfitId(chosen);
+            OutfitHistory history = state.outfitHistory(playerKey);
+            if (historyUpdate.action() == HistoryAction.RECORD || !history.activate(historyUpdate.selection())) {
+                history.record(chosenId);
+            }
+            state.lastOutfit.put(playerKey, chosenId);
             state.save(statePath, DailyDress.LOGGER);
-            if (owner.config().announceOutfit) {
+            if (historyUpdate.action() == HistoryAction.PREVIOUS) {
+                player.sendSystemMessage(styled(
+                        "Changed back to your previous outfit, “" + displayName(chosen) + "” ✿",
+                        ChatFormatting.LIGHT_PURPLE
+                ));
+            } else if (owner.config().announceOutfit) {
                 String lead = afterSleep ? "Good morning! Today’s outfit is " : "Changed into ";
                 player.sendSystemMessage(styled(lead + "“" + displayName(chosen) + "” ✿", ChatFormatting.LIGHT_PURPLE));
             }
@@ -409,6 +475,11 @@ public final class WardrobeService implements AutoCloseable {
         } catch (IllegalArgumentException exception) {
             return path.toAbsolutePath().normalize().toString();
         }
+    }
+
+    private String currentOutfit(ServerPlayer player) {
+        String playerKey = player.getUUID().toString();
+        return state.outfitHistory(playerKey).current().orElse(state.lastOutfit.get(playerKey));
     }
 
     private static String displayName(Path path) {
@@ -447,6 +518,26 @@ public final class WardrobeService implements AutoCloseable {
         String status = "unsorted";
         List<String> tags = Collections.emptyList();
         String model = "auto";
+    }
+
+    private enum HistoryAction {
+        RECORD,
+        PREVIOUS,
+        FORWARD
+    }
+
+    private record HistoryUpdate(HistoryAction action, OutfitHistory.Selection selection) {
+        private static HistoryUpdate record() {
+            return new HistoryUpdate(HistoryAction.RECORD, null);
+        }
+
+        private static HistoryUpdate previous(OutfitHistory.Selection selection) {
+            return new HistoryUpdate(HistoryAction.PREVIOUS, selection);
+        }
+
+        private static HistoryUpdate forward(OutfitHistory.Selection selection) {
+            return new HistoryUpdate(HistoryAction.FORWARD, selection);
+        }
     }
 
     @Override

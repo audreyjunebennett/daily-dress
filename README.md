@@ -7,7 +7,8 @@ wardrobe, avoids the previous outfit, and applies it as a server-visible skin.
 ## In-game commands
 
 - `/dailydress on` and `/dailydress off` — opt in or out
-- `/dailydress next` — change immediately
+- `/dailydress next` — move forward after using `previous`, or choose a new outfit
+- `/dailydress previous` — return to the previous available outfit
 - `/dailydress status` — show the active batch, eligible/total outfits, flags, and model mode
 - `/dailydress batch` — query the collection used after sleep
 - `/dailydress batch all` — use every kept outfit
@@ -19,7 +20,8 @@ wardrobe, avoids the previous outfit, and applies it as a server-visible skin.
 
 Personal server wardrobes live in `config/daily-dress/wardrobe/players/<player UUID>`. The joining
 player's authenticated UUID chooses the destination, so one client cannot replace another player's
-wardrobe. Generated MineSkin texture properties are cached in `config/daily-dress/state.json`.
+wardrobe. Generated MineSkin texture properties and each player's outfit history are persisted in
+`config/daily-dress/state.json`.
 
 The Styler writes a complete personal set to the client's `config/daily-dress/sync-outbox`. While
 connected to a compatible server, the client sends changed PNGs and their favorite/category/model
