@@ -11,11 +11,8 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from face_picker import FacePicker
-from hair_picker import HairPicker, PixelEyedropper
-from eye_designer import EyeDesigner
+from integrated_workbench import IntegratedWorkbench
 from minecraft_theme import COLORS, apply_minecraft_theme
-from pixel_category_editor import PixelCategoryEditor
 from skin_styler_core import (
     detect_skin_model,
     generate_folder,
@@ -25,10 +22,9 @@ from skin_styler_core import (
     parse_hex_color,
     render_front_face,
     render_player_3d,
-    render_player_view,
     style_skin,
 )
-from wardrobe_picker import PickerState, TAGS, WardrobePicker
+from wardrobe_picker import PickerState, TAGS
 
 
 DEFAULT_HAIR_HUE_COLOR = "#9C5FA8"
@@ -159,8 +155,6 @@ class SkinStylerApp(tk.Tk):
         self._sample_paths: list[Path] = []
         self._sample_index = -1
         self._picker_state: PickerState | None = None
-        self._strip_images: list[ImageTk.PhotoImage] = []
-        self._strip_job: str | None = None
         self._preview_yaw = 25.0
         self._preview_drag_x: int | None = None
         self._slider_undo_stack: list[dict[str, float]] = []
@@ -208,10 +202,10 @@ class SkinStylerApp(tk.Tk):
         reference_frame = ttk.Frame(frame)
         reference_frame.grid(row=3, column=1, columnspan=2, sticky="ew", pady=5)
         ttk.Entry(reference_frame, textvariable=self.reference_var).grid(row=0, column=0, sticky="ew", padx=(8, 8))
-        ttk.Button(reference_frame, text="Eye gallery…", command=self._open_face_picker).grid(row=0, column=1, sticky="ew", padx=(0, 7))
+        ttk.Button(reference_frame, text="Eyes below", command=lambda: self._show_workbench("eyes")).grid(row=0, column=1, sticky="ew", padx=(0, 7))
         ttk.Button(reference_frame, text="Browse…", command=self._choose_reference).grid(row=0, column=2, sticky="ew", padx=(0, 10))
         ttk.Label(reference_frame, text="Full face is context; only eye pixels are copied.", foreground="#777777").grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(3, 0))
-        ttk.Button(reference_frame, text="Design eyes…", command=self._open_eye_designer).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(0, 10), pady=(3, 0))
+        ttk.Button(reference_frame, text="Design below", command=lambda: self._show_workbench("eyes", "designer")).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(0, 10), pady=(3, 0))
         preview_box = tk.Frame(reference_frame, width=66, height=66, background="#2B2B2B", relief="solid", borderwidth=1)
         preview_box.grid(row=0, column=3, rowspan=2, sticky="e")
         preview_box.grid_propagate(False)
@@ -268,9 +262,9 @@ class SkinStylerApp(tk.Tk):
 
         hair_reference_buttons = ttk.Frame(color_frame)
         hair_reference_buttons.grid(row=3, column=1, columnspan=4, sticky="ew", pady=(6, 0))
-        ttk.Button(hair_reference_buttons, text="Hair gallery…", command=self._open_hair_gallery, style="Rose.TButton").pack(side="left")
+        ttk.Button(hair_reference_buttons, text="Hair library", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(side="left")
         ttk.Button(hair_reference_buttons, text="Choose sample file…", command=self._choose_hair_sample).pack(side="left", padx=(7, 0))
-        ttk.Button(hair_reference_buttons, text="Eyedropper on sample…", command=self._eyedrop_current).pack(side="left", padx=(7, 0))
+        ttk.Button(hair_reference_buttons, text="Exact pixel below", command=lambda: self._show_workbench("hair", "sampler")).pack(side="left", padx=(7, 0))
         ttk.Label(
             color_frame,
             text="Gallery/sample sets both the visible reference and the starting color; sliders are for refinement.",
@@ -415,8 +409,7 @@ class SkinStylerApp(tk.Tk):
 
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(18, 12))
-        ttk.Button(button_frame, text="Full wardrobe gallery…", command=self._open_picker).pack(side="left")
-        ttk.Button(button_frame, text="Preview every kept skin", command=self._preview).pack(side="left", padx=(10, 0))
+        ttk.Button(button_frame, text="Wardrobe workspace", command=lambda: self._show_workbench("wardrobe")).pack(side="left")
         self.install_button = ttk.Button(button_frame, text="Generate + prepare sync", command=lambda: self._generate(True))
         self.install_button.pack(side="left", padx=10)
         self.generate_button = ttk.Button(button_frame, text="Generate only", command=lambda: self._generate(False))
@@ -460,7 +453,7 @@ class SkinStylerApp(tk.Tk):
         preview_box = tk.Frame(
             workspace,
             width=425,
-            height=390,
+            height=310,
             background=COLORS["slot"],
             highlightthickness=3,
             highlightbackground=COLORS["stone_dark"],
@@ -484,7 +477,7 @@ class SkinStylerApp(tk.Tk):
         nav.pack(fill="x", pady=(5, 7))
         ttk.Button(nav, text="◀ Previous", command=lambda: self._cycle_sample(-1)).pack(side="left")
         ttk.Button(nav, text="Next ▶", command=lambda: self._cycle_sample(1)).pack(side="right")
-        ttk.Button(nav, text="Hair gallery", command=self._open_hair_gallery, style="Rose.TButton").pack(expand=True)
+        ttk.Button(nav, text="Browse hair below", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(expand=True)
 
         model_row = ttk.Frame(workspace)
         model_row.pack(fill="x", pady=(0, 7))
@@ -524,24 +517,15 @@ class SkinStylerApp(tk.Tk):
         )
         tag_box.pack(side="left", padx=(7, 5))
         tag_box.bind("<<ComboboxSelected>>", lambda _event: self._set_current_tag())
-        ttk.Button(categories, text="Fix pixel categories…", command=self._open_category_editor, style="Accent.TButton").pack(side="right")
+        ttk.Button(categories, text="Fix pixels below", command=lambda: self._show_workbench("pixels"), style="Accent.TButton").pack(side="right")
 
         ttk.Label(
             workspace,
-            text="Styled quick-picks · click one to update the large 3D view",
-            style="Muted.TLabel",
+            text="ALL-IN-ONE WORKBENCH · switch tools without opening another window",
+            style="Step.TLabel",
         ).pack(fill="x", pady=(2, 3))
-        strip_holder = tk.Frame(workspace, background=COLORS["slot"], height=124)
-        strip_holder.pack(fill="both", expand=True)
-        strip_holder.pack_propagate(False)
-        self.strip_canvas = tk.Canvas(strip_holder, background=COLORS["slot"], highlightthickness=0, height=104)
-        strip_scroll = ttk.Scrollbar(strip_holder, orient="horizontal", command=self.strip_canvas.xview)
-        self.strip_canvas.configure(xscrollcommand=strip_scroll.set)
-        self.strip_canvas.pack(fill="both", expand=True)
-        strip_scroll.pack(fill="x")
-        self.strip_frame = tk.Frame(self.strip_canvas, background=COLORS["slot"])
-        self.strip_window = self.strip_canvas.create_window((0, 0), window=self.strip_frame, anchor="nw")
-        self.strip_frame.bind("<Configure>", lambda _event: self.strip_canvas.configure(scrollregion=self.strip_canvas.bbox("all")))
+        self.workbench = IntegratedWorkbench(workspace, self)
+        self.workbench.pack(fill="both", expand=True)
 
     def _history_scale(self, parent: tk.Misc, **options) -> ttk.Scale:
         """Create a scale whose entire mouse drag is one undoable action."""
@@ -647,61 +631,25 @@ class SkinStylerApp(tk.Tk):
         if selected:
             self.reference_var.set(selected)
 
-    def _open_face_picker(self) -> None:
-        source = Path(self.input_var.get()).expanduser()
-        if not source.is_dir():
-            messagebox.showerror("Cannot open eye gallery", f"Source folder does not exist:\n{source}")
-            return
-        if not any(source.rglob("*.png")):
-            messagebox.showerror("Cannot open eye gallery", "No PNG skins were found in the Source wardrobe.")
-            return
-        FacePicker(self, source, self._use_face_reference_and_design)
-
-    def _open_eye_designer(self, initial: Path | None = None) -> None:
-        if initial is None:
-            selected = Path(self.reference_var.get()).expanduser() if self.reference_var.get().strip() else None
-            initial = selected if selected is not None and selected.is_file() else None
-        if initial is None and self.custom_eye_reference.is_file():
-            initial = self.custom_eye_reference
-        self._ensure_hair_sample()
-        preview_skin = initial
-        if preview_skin == self.custom_eye_reference or preview_skin is None:
-            preview_skin = self._hair_sample_path
-        EyeDesigner(
-            self,
-            initial,
-            self.custom_eye_reference,
-            self._use_face_reference,
-            preview_skin=preview_skin,
-            eyes_over_bangs=self.eyes_over_bangs_var.get(),
-            preserve_hat_layer_lashes=self.preserve_hat_lashes_var.get(),
-        )
-
-    def _use_face_reference_and_design(self, path: Path) -> None:
-        self._use_face_reference(path)
-        # Let the gallery release its modal grab and close before the designer
-        # opens with the chosen skin as its exact starting point.
-        self.after_idle(lambda chosen=path: self._open_eye_designer(chosen))
-
     def _use_face_reference(self, path: Path) -> None:
         self.reference_var.set(str(path))
         label = "Custom eyes designed" if path.resolve() == self.custom_eye_reference.resolve() else "Reference eyes selected"
         self.status_var.set(f"{label}: {path.name}")
 
-    def _open_picker(self) -> None:
-        source = Path(self.input_var.get()).expanduser()
-        if not source.is_dir():
-            messagebox.showerror("Cannot open wardrobe", f"Source folder does not exist:\n{source}")
-            return
-        if not any(source.rglob("*.png")):
-            messagebox.showerror("Cannot open wardrobe", "No PNG skins were found in the source folder.")
-            return
-        picker = WardrobePicker(self, source, self._use_picker_source)
-        picker.bind("<Destroy>", lambda event: self._reload_wardrobe_state() if event.widget is picker else None, add=True)
+    def _show_workbench(self, mode: str, subview: str = "gallery") -> None:
+        """Bring one of the embedded tools into view without opening a window."""
 
-    def _use_picker_source(self, source: Path) -> None:
-        self.input_var.set(str(source))
-        self.status_var.set(f"Source wardrobe selected: {source}")
+        if not hasattr(self, "workbench"):
+            return
+        self.workbench.set_mode(mode, subview=subview)
+        self.workbench.stage.focus_set()
+        labels = {
+            "wardrobe": "Wardrobe library",
+            "hair": "Hair library",
+            "eyes": "Eye library",
+            "pixels": "Pixel-category editor",
+        }
+        self.status_var.set(f"{labels.get(mode, 'Workbench')} is open below the live 3D preview.")
 
     def _refresh_reference_preview(self, *_args) -> None:
         value = self.reference_var.get().strip()
@@ -849,13 +797,6 @@ class SkinStylerApp(tk.Tk):
             self._refresh_hair_preview()
             self._schedule_strip_refresh()
 
-    def _open_hair_gallery(self) -> None:
-        source = Path(self.input_var.get()).expanduser()
-        if not source.is_dir() or not self._sample_paths:
-            messagebox.showerror("Cannot open hair gallery", "Choose a source wardrobe containing PNG skins first.")
-            return
-        HairPicker(self, source, self._use_hair_reference)
-
     def _use_hair_reference(self, path: Path, color: tuple[int, int, int]) -> None:
         if not self._load_hair_sample(path):
             return
@@ -883,12 +824,6 @@ class SkinStylerApp(tk.Tk):
             self._set_target_hair_rgb(representative_hair_color(image, float(self.tolerance_var.get())))
         except ValueError:
             self.status_var.set("That skin has little or no visible hair; it remains the preview sample without changing the target color.")
-
-    def _eyedrop_current(self) -> None:
-        if not self._ensure_hair_sample() or self._hair_sample_path is None:
-            messagebox.showerror("No sample skin", "Choose a hair sample first.")
-            return
-        PixelEyedropper(self, self._hair_sample_path, self._set_target_hair_rgb)
 
     def _cycle_sample(self, change: int) -> None:
         working = self._working_paths()
@@ -978,24 +913,6 @@ class SkinStylerApp(tk.Tk):
                 return model == "slim"
         return detect_skin_model(image) == "slim"
 
-    def _open_category_editor(self) -> None:
-        if not self._ensure_hair_sample() or self._hair_sample_path is None:
-            messagebox.showerror("No skin selected", "Choose a skin before opening pixel categories.")
-            return
-        relative = self._relative_sample()
-        if relative is None or self._picker_state is None:
-            messagebox.showerror("Not in this wardrobe", "Pixel corrections are saved per source skin. Choose a skin from the source wardrobe.")
-            return
-        PixelCategoryEditor(
-            self,
-            self._hair_sample_path,
-            self._picker_state.get_corrections(relative),
-            lambda corrections, key=relative: self._save_category_corrections(key, corrections),
-            tolerance=float(round(self.tolerance_var.get())),
-            skin_tolerance=float(round(self.skin_tolerance_var.get())),
-            include_body_hair=self.body_hair_var.get(),
-        )
-
     def _save_category_corrections(self, relative: str, corrections: dict[tuple[int, int], str]) -> None:
         if self._picker_state is None:
             return
@@ -1018,14 +935,8 @@ class SkinStylerApp(tk.Tk):
         return str(self._picker_state.details(relative)["hair_mode"]) == "none"
 
     def _schedule_strip_refresh(self) -> None:
-        if not hasattr(self, "strip_frame"):
-            return
-        if self._strip_job is not None:
-            try:
-                self.after_cancel(self._strip_job)
-            except tk.TclError:
-                pass
-        self._strip_job = self.after(120, self._refresh_workspace_strip)
+        if hasattr(self, "workbench"):
+            self.workbench.refresh()
 
     def _style_preview_image(self, image: Image.Image, path: Path | None = None) -> Image.Image:
         target = parse_hex_color(self.hair_var.get())
@@ -1070,20 +981,20 @@ class SkinStylerApp(tk.Tk):
         try:
             styled = self._style_preview_image(self._hair_sample_image, self._hair_sample_path)
             slim = self._current_model_is_slim(self._hair_sample_image, self._hair_sample_path)
-            before = render_player_3d(self._hair_sample_image, 8, slim=slim, yaw_degrees=self._preview_yaw)
-            after = render_player_3d(styled, 8, slim=slim, yaw_degrees=self._preview_yaw)
-            comparison = Image.new("RGBA", (420, 380), (30, 37, 41, 255))
+            before = render_player_3d(self._hair_sample_image, 7, slim=slim, yaw_degrees=self._preview_yaw)
+            after = render_player_3d(styled, 7, slim=slim, yaw_degrees=self._preview_yaw)
+            comparison = Image.new("RGBA", (420, 300), (30, 37, 41, 255))
             before_x = 110 - before.width // 2
             after_x = 310 - after.width // 2
-            model_y = max(42, (380 - before.height) // 2 + 15)
+            model_y = max(34, (300 - before.height) // 2 + 11)
             comparison.alpha_composite(before, (before_x, model_y))
             comparison.alpha_composite(after, (after_x, model_y))
             draw = ImageDraw.Draw(comparison)
             draw.text((110, 16), "ORIGINAL", fill=(200, 191, 167, 255), anchor="mm")
             draw.text((310, 16), "STYLED", fill=(244, 201, 93, 255), anchor="mm")
-            draw.line((195, 190, 217, 190), fill=(217, 122, 174, 255), width=4)
-            draw.polygon(((217, 181), (232, 190), (217, 199)), fill=(217, 122, 174, 255))
-            draw.text((210, 362), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
+            draw.line((195, 150, 217, 150), fill=(217, 122, 174, 255), width=4)
+            draw.polygon(((217, 141), (232, 150), (217, 159)), fill=(217, 122, 174, 255))
+            draw.text((210, 284), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
             self._hair_preview_image = ImageTk.PhotoImage(comparison)
             self.hair_preview.configure(image=self._hair_preview_image, text="")
             self._refresh_current_metadata()
@@ -1093,62 +1004,8 @@ class SkinStylerApp(tk.Tk):
             self.hair_preview.configure(image="", text=f"preview unavailable\n{str(exception)[:80]}")
 
     def _refresh_workspace_strip(self) -> None:
-        self._strip_job = None
-        if not hasattr(self, "strip_frame"):
-            return
-        for child in self.strip_frame.winfo_children():
-            child.destroy()
-        self._strip_images.clear()
-        working = self._working_paths()
-        if not working:
-            tk.Label(
-                self.strip_frame,
-                text="No skins match this working set",
-                background=COLORS["slot"],
-                foreground=COLORS["muted"],
-            ).pack(padx=12, pady=30)
-            return
-        try:
-            selected = working.index(self._hair_sample_path) if self._hair_sample_path is not None else 0
-        except ValueError:
-            selected = 0
-        start = max(0, min(len(working) - 12, selected - 5))
-        visible = working[start : start + 12]
-        for path in visible:
-            try:
-                with Image.open(path) as image:
-                    normalized, _ = normalize_skin(image)
-                styled = self._style_preview_image(normalized, path)
-                slim = self._current_model_is_slim(normalized, path)
-                preview = render_player_view(styled, scale=2, slim=slim)
-                photo = ImageTk.PhotoImage(preview)
-            except Exception:
-                continue
-            self._strip_images.append(photo)
-            selected_path = path == self._hair_sample_path
-            card = tk.Frame(
-                self.strip_frame,
-                background=COLORS["grass_dark"] if selected_path else COLORS["panel_alt"],
-                highlightthickness=2,
-                highlightbackground=COLORS["gold"] if selected_path else COLORS["stone_dark"],
-            )
-            card.pack(side="left", padx=4, pady=5)
-            tk.Button(
-                card,
-                image=photo,
-                command=lambda chosen=path: (self._load_hair_sample(chosen), self._refresh_hair_preview()),
-                background=card.cget("background"),
-                activebackground=COLORS["grass"],
-                relief="flat",
-                borderwidth=0,
-                cursor="hand2",
-            ).pack(padx=7, pady=(5, 1))
-            tk.Label(
-                card,
-                text=path.stem[:11],
-                background=card.cget("background"),
-                foreground=COLORS["cream"],
-            ).pack(padx=2, pady=(0, 3))
+        if hasattr(self, "workbench"):
+            self.workbench.invalidate()
 
     def _begin_live_preview_drag(self, event: tk.Event) -> None:
         self._preview_drag_x = int(event.x)
@@ -1306,190 +1163,6 @@ class SkinStylerApp(tk.Tk):
             accessory_target,
             self.preserve_hat_lashes_var.get(),
         )
-
-    def _preview(self) -> None:
-        try:
-            (
-                input_folder,
-                _output,
-                reference,
-                target,
-                tolerance,
-                skin_target,
-                skin_tolerance,
-                include_body_hair,
-                eyes_over_bangs,
-                outfit_target,
-                accessory_target,
-                preserve_hat_lashes,
-            ) = self._settings()
-            files = self._working_paths()
-            if not files:
-                raise ValueError("No kept skins match the selected working set")
-            template = None
-            if self.face_var.get() and reference is not None:
-                with Image.open(reference) as reference_image:
-                    template = make_face_template(reference_image, tolerance)
-
-            rows: list[tuple[str, Image.Image, Image.Image, bool]] = []
-            self.status_var.set(f"Preparing {len(files)} lightweight preview thumbnails…")
-            self.update_idletasks()
-            for path in files:
-                with Image.open(path) as image:
-                    normalized, _ = normalize_skin(image)
-                    styled, _mask, _was_hd = style_skin(
-                        normalized,
-                        target,
-                        tolerance,
-                        template,
-                        False,
-                        skin_target,
-                        skin_tolerance,
-                        include_body_hair,
-                        eyes_over_bangs,
-                        outfit_target,
-                        accessory_target,
-                        preserve_hat_lashes,
-                        self._corrections_for(path),
-                        self.adaptive_detection_var.get(),
-                        self._suppress_hair_for(path),
-                    )
-                rows.append((path.stem, normalized, styled, self._current_model_is_slim(normalized, path)))
-            self._show_preview(rows)
-            self.status_var.set(f"Previewing all {len(rows)} skins · click any card for full 360°")
-        except Exception as exception:
-            messagebox.showerror("Could not preview", str(exception))
-
-    def _show_preview(self, rows: list[tuple[str, Image.Image, Image.Image, bool]]) -> None:
-        window = tk.Toplevel(self)
-        window.title("Daily Dress — all original → styled previews")
-        window.geometry("1120x820")
-        window.minsize(720, 480)
-        canvas = tk.Canvas(window, width=1080, height=780, background="#202124")
-        scrollbar = ttk.Scrollbar(window, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        preview_images: list[ImageTk.PhotoImage] = []
-        # Keep each gallery's thumbnails alive independently if two preview
-        # windows are opened at once.
-        window._daily_dress_preview_images = preview_images  # type: ignore[attr-defined]
-
-        canvas.create_text(
-            18,
-            22,
-            text=f"All {len(rows)} skins · lightweight thumbnails · click one for a large resizable 360° comparison",
-            fill="white",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-        )
-
-        columns = 4
-        tile_width = 265
-        tile_height = 195
-        for index, (name, before, after, slim) in enumerate(rows):
-            column = index % columns
-            row = index // columns
-            x = 10 + column * tile_width
-            y = 48 + row * tile_height
-            tag = f"preview-card-{index}"
-            canvas.create_rectangle(
-                x,
-                y,
-                x + tile_width - 10,
-                y + tile_height - 10,
-                fill="#2B2D32",
-                outline="#464950",
-                width=2,
-                tags=(tag,),
-            )
-            before_tk = ImageTk.PhotoImage(render_player_view(before, scale=4, slim=slim))
-            after_tk = ImageTk.PhotoImage(render_player_view(after, scale=4, slim=slim))
-            preview_images.extend((before_tk, after_tk))
-            canvas.create_text(x + 16, y + 12, text="original", fill="#B9BBC2", anchor="nw", tags=(tag,))
-            canvas.create_text(x + 150, y + 12, text="styled", fill="#B9BBC2", anchor="nw", tags=(tag,))
-            canvas.create_image(x + 62, y + 88, image=before_tk, anchor="center", tags=(tag,))
-            canvas.create_text(x + 128, y + 88, text="→", fill="#D7A9E3", font=("Segoe UI", 18, "bold"), tags=(tag,))
-            canvas.create_image(x + 195, y + 88, image=after_tk, anchor="center", tags=(tag,))
-            canvas.create_text(x + 12, y + 160, text=name[:36], fill="white", anchor="w", font=("Segoe UI", 9), tags=(tag,))
-            canvas.tag_bind(
-                tag,
-                "<Button-1>",
-                lambda _event, selected_name=name, original=before, styled=after, selected_slim=slim: self._show_preview_detail(
-                    selected_name, original, styled, selected_slim
-                ),
-            )
-            canvas.tag_bind(tag, "<Enter>", lambda _event: canvas.configure(cursor="hand2"))
-            canvas.tag_bind(tag, "<Leave>", lambda _event: canvas.configure(cursor=""))
-        gallery_height = 58 + ((len(rows) + columns - 1) // columns) * tile_height
-        canvas.configure(scrollregion=(0, 0, columns * tile_width + 10, gallery_height))
-        canvas.bind(
-            "<MouseWheel>",
-            lambda event: canvas.yview_scroll(-1 * int(event.delta / 120), "units"),
-        )
-
-    def _show_preview_detail(self, name: str, before: Image.Image, after: Image.Image, slim: bool = True) -> None:
-        window = tk.Toplevel(self)
-        window.title(f"360° original → styled — {name}")
-        window.geometry("900x720")
-        window.minsize(620, 480)
-        canvas = tk.Canvas(window, background="#202124", highlightthickness=0, cursor="fleur")
-        canvas.pack(fill="both", expand=True)
-        state = {"yaw": self._preview_yaw, "drag_x": None, "resize_job": None, "photos": []}
-
-        def redraw() -> None:
-            state["resize_job"] = None
-            width = max(600, canvas.winfo_width())
-            height = max(440, canvas.winfo_height())
-            model_scale = max(4, min(18, round(min(width / 38, (height - 90) / 34))))
-            before_model = render_player_3d(before, model_scale, slim=slim, yaw_degrees=float(state["yaw"]))
-            after_model = render_player_3d(after, model_scale, slim=slim, yaw_degrees=float(state["yaw"]))
-            before_tk = ImageTk.PhotoImage(before_model)
-            after_tk = ImageTk.PhotoImage(after_model)
-            state["photos"] = [before_tk, after_tk]
-            canvas.delete("all")
-            canvas.create_text(width // 2, 24, text=name, fill="white", font=("Segoe UI", 13, "bold"))
-            canvas.create_text(
-                width // 2,
-                49,
-                text=f"drag anywhere for continuous 360° · {round(float(state['yaw'])) % 360}° · both Minecraft layers",
-                fill="#B9BBC2",
-                font=("Segoe UI", 10),
-            )
-            canvas.create_text(width // 4, 78, text="original", fill="white", font=("Segoe UI", 11, "bold"))
-            canvas.create_text(3 * width // 4, 78, text="styled", fill="white", font=("Segoe UI", 11, "bold"))
-            center_y = 90 + (height - 90) // 2
-            canvas.create_image(width // 4, center_y, image=before_tk, anchor="center")
-            canvas.create_text(width // 2, center_y, text="→", fill="#D7A9E3", font=("Segoe UI", 24, "bold"))
-            canvas.create_image(3 * width // 4, center_y, image=after_tk, anchor="center")
-
-        def schedule_redraw(_event=None) -> None:
-            job = state.get("resize_job")
-            if job is not None:
-                window.after_cancel(job)
-            state["resize_job"] = window.after(70, redraw)
-
-        def begin_drag(event: tk.Event) -> None:
-            state["drag_x"] = int(event.x)
-
-        def drag(event: tk.Event) -> None:
-            current_x = int(event.x)
-            previous = state.get("drag_x")
-            if previous is None:
-                state["drag_x"] = current_x
-                return
-            delta = current_x - int(previous)
-            if abs(delta) < 3:
-                return
-            state["yaw"] = (float(state["yaw"]) + delta * 1.3) % 360.0
-            self._preview_yaw = float(state["yaw"])
-            state["drag_x"] = current_x
-            redraw()
-
-        canvas.bind("<Configure>", schedule_redraw)
-        canvas.bind("<ButtonPress-1>", begin_drag)
-        canvas.bind("<B1-Motion>", drag)
-        window.after(50, redraw)
 
     def _selected_install_targets(self) -> list[tuple[str, Path]]:
         if self.sync_var.get() and self.sync_outbox is not None:

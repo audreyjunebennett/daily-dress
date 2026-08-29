@@ -36,22 +36,21 @@ per-skin Styler overrides and otherwise detects the arm format from the PNG.
 Run `tools/Open Daily Dress Skin Styler.bat`. The main workbench now combines the important flow:
 
 1. Choose the source wardrobe. The app confirms how many PNG skins it found.
-2. Sort inline or open the full gallery. Favorite/Maybe/Remove/Unsorted and Dresses/Casual/Seasonal/Other
-   save as lightweight metadata; originals are not moved, copied, renamed, or edited.
-3. Cycle skins in the large rotatable original → styled 3D viewer. The styled quick-pick strip follows
-   the selected working set, including favorite + category combinations.
-4. Choose a Hair Gallery reference. Its detected palette becomes both the preview basis and starting
-   **Target Hair Color**. An in-skin eyedropper and normal color chooser are also available; hue,
-   saturation, and lightness sliders remain refinement tools.
-5. Choose eyes from Eye Gallery or use the pixel-level Eye Designer. A selected skin can also supply
-   the target exposed-skin tone.
-6. Leave auto-tuned detection enabled for good per-skin defaults. For a difficult skin, open **Fix pixel
-   categories** and paint sparse Hair/Skin/Outfit/Accessory/Eyes/Ignore corrections. Hooded or helmeted
-   skins can be marked as having no visible hair with one click.
+2. Use the full searchable, filterable wardrobe library directly below the live preview. There are no
+   quick picks or separate gallery windows. Favorite/Maybe/Remove/Unsorted and outfit categories save
+   as lightweight metadata; originals are not moved, copied, renamed, or edited.
+3. Switch the embedded workbench between **Wardrobe**, **Hair**, **Eyes**, and **Pixels**. The same large
+   original → styled 3D viewer remains visible while the lower tool changes.
+4. In Hair mode, choose any hairstyle and detected starting color, or switch the same panel to its exact
+   source-pixel sampler. Hue, saturation, and lightness sliders remain refinement tools.
+5. In Eyes mode, choose any face or switch the same panel to the custom eye pixel designer. A selected
+   skin can also supply the target exposed-skin tone.
+6. In Pixels mode, paint sparse Hair/Skin/Outfit/Accessory/Eyes/Ignore corrections inline. They save
+   automatically. Hooded or helmeted skins can be marked as having no visible hair with one click.
 7. Optionally recolor outfit and hair-accessory palettes. Hue rotation preserves each material's
    relative color and shading relationships instead of flattening multicolor designs.
-8. Preview the kept working set, generate one flat output folder, and prepare sync once the whole round
-   looks right.
+8. Inspect every skin through the embedded library and live 3D view, generate one flat output folder,
+   and prepare sync once the whole round looks right.
 
 Dark and black hair is colorized explicitly rather than being skipped as a neutral palette. Textured
 hair uses adaptive tolerance, long hair is traced across safe torso/shoulder seams, and skin/outfit
