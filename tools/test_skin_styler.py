@@ -4,15 +4,17 @@ import unittest
 import colorsys
 import json
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from skin_styler_core import (
+    apply_category_overrides,
     detect_skin_model,
     FaceTemplate,
     _fill_small_torso_hair_gaps,
     _hair_core_palette,
     _trace_surface_hair_paths,
     apply_face_template,
+    classify_skin_categories,
     detect_body_hair_mask,
     generate_folder,
     install_generated_wardrobe,
@@ -47,6 +49,21 @@ def synthetic_skin(hair=(40, 20, 10, 255), eye=(20, 30, 80, 255), size=64):
 
 
 class SkinStylerTests(unittest.TestCase):
+    def test_hair_recolor_preserves_brown_to_blue_highlight_gradient(self):
+        source = synthetic_skin()
+        for x in range(32):
+            for y in range(16):
+                # Smooth brown gradient, with two-tone head layers alike.
+                value = 38 + round(170 * (y / 15))
+                source.putpixel((x, y), (value, round(value * .68), round(value * .48), 255))
+                source.putpixel((x + 32, y), (value, round(value * .68), round(value * .48), 255))
+        mask = {(x, y) for x in range(64) for y in range(16)
+                if not (8 <= x % 32 < 16 and 8 <= y < 16)}
+        styled, _, _ = style_skin(source, (95, 165, 235), category_overrides=dict.fromkeys(mask, "hair"))
+        levels = [max(styled.getpixel((x, y))[:3]) for x, y in ((2, 1), (2, 4), (2, 8), (2, 12), (2, 15))]
+        self.assertEqual(levels, sorted(levels), levels)
+        self.assertGreater(levels[-1] - levels[0], 65)
+
     def test_black_hair_receives_target_color_without_flattening_dark_shading(self):
         original = synthetic_skin(hair=(2, 2, 2, 255))
         original.putpixel((9, 1), (14, 14, 14, 255))
@@ -57,6 +74,45 @@ class SkinStylerTests(unittest.TestCase):
         self.assertNotEqual(styled.getpixel((9, 1)), original.getpixel((9, 1)))
         self.assertGreater(styled.getpixel((9, 1))[2], styled.getpixel((9, 1))[0])
         self.assertLess(sum(styled.getpixel((8, 1))[:3]), sum(styled.getpixel((9, 1))[:3]))
+
+    def test_pale_side_decoration_does_not_disable_dark_hair_recolor(self):
+        dark = (24, 24, 24, 255)
+        source = synthetic_skin(hair=dark)
+        draw = ImageDraw.Draw(source)
+        draw.rectangle((0, 8, 7, 15), fill=(236, 192, 201, 255))
+        draw.rectangle((8, 0, 15, 7), fill=(236, 192, 201, 255))
+        styled, mask, _ = style_skin(source, (180, 120, 220))
+        self.assertIn((27, 11), mask)
+        self.assertNotEqual(styled.getpixel((27, 11)), dark)
+
+    def test_split_dye_keeps_dark_bangs_and_long_strands_with_eye_styling(self):
+        dark = (24, 24, 24, 255)
+        light = (236, 192, 201, 255)
+        source = synthetic_skin(hair=dark)
+        draw = ImageDraw.Draw(source)
+        for box in ((12, 0, 23, 7), (16, 8, 23, 15), (28, 8, 31, 15)):
+            draw.rectangle(box, fill=light)
+        draw.rectangle((8, 11, 10, 13), fill=dark)
+        draw.rectangle((40, 11, 41, 13), fill=dark)
+        draw.line((20, 20, 20, 30), fill=dark)
+        draw.line((27, 20, 27, 30), fill=light)
+
+        liner = (129, 78, 99, 255)
+        iris = (103, 134, 171, 255)
+        eyes = FaceTemplate({(8, 12): liner, (9, 12): iris, (14, 12): iris}, (205, 145, 115))
+        dark_points = {(8, 1), (8, 12), (9, 12), (40, 12), (41, 13), (20, 25)}
+        light_points = {(18, 2), (27, 25)}
+        corrections = dict.fromkeys(dark_points | light_points, "hair")
+        for hair_color in (None, (233, 216, 198)):
+            with self.subTest(hair_color=hair_color):
+                styled, mask, _ = style_skin(source, hair_color, face_template=eyes,
+                                             category_overrides=corrections)
+                for point in dark_points:
+                    self.assertIn(point, mask)
+                    self.assertEqual(styled.getpixel(point), dark)
+                for point in light_points:
+                    self.assertEqual(styled.getpixel(point) != light, hair_color is not None)
+                self.assertEqual(styled.getpixel((14, 12)), iris)
 
     def test_manual_category_overrides_can_reclaim_and_ignore_individual_pixels(self):
         original = synthetic_skin(hair=(80, 40, 20, 255))
@@ -100,6 +156,18 @@ class SkinStylerTests(unittest.TestCase):
 
         self.assertEqual(detect_skin_model(classic), "classic")
         self.assertEqual(detect_skin_model(slim), "slim")
+
+    def test_skin_model_detection_recognizes_black_padding_with_painted_arm_boundaries(self):
+        skin = Image.new("RGBA", (64, 64), (212, 162, 118, 255))
+        draw = ImageDraw.Draw(skin)
+        strips = ((54, 20, 55, 31), (46, 52, 47, 63), (50, 16, 51, 19), (42, 48, 43, 51))
+        for box in strips:
+            draw.rectangle(box, fill=(0, 0, 0, 255))
+        self.assertEqual(detect_skin_model(skin), "slim")
+        # A painted fourth column or an entirely black sleeve is real geometry.
+        draw.line((54, 20, 54, 31), fill=(27, 55, 100, 255))
+        self.assertEqual(detect_skin_model(skin), "classic")
+        self.assertEqual(detect_skin_model(Image.new("RGBA", (64, 64), "black")), "classic")
 
     def test_recolor_is_confined_to_head_uv(self):
         original = synthetic_skin()
@@ -174,6 +242,109 @@ class SkinStylerTests(unittest.TestCase):
         self.assertIn((184, 88, 56), core)
         self.assertIn((216, 104, 72), core)
         self.assertNotIn((200, 184, 232), core)
+
+    def test_back_braid_crosses_both_leg_uvs_and_preserves_flowers_and_shoes(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        flower = (240, 240, 239, 255)
+        shoe = (246, 203, 1, 255)
+        for y in range(20, 32):
+            for x in range(34, 38):
+                original.putpixel((x, y), hair)
+        braid = set()
+        for row in range(11):
+            # Back view: left leg comes before right leg, unlike front view.
+            for column in (3, 4 if row % 2 else 2):
+                coordinate = ((28 + column, 52 + row) if column < 4
+                              else (12 + column - 4, 20 + row))
+                original.putpixel(coordinate, hair)
+                braid.add(coordinate)
+        original.putpixel((31, 56), flower)
+        braid.remove((31, 56))
+        leaf = (101, 129, 44, 255)
+        original.putpixel((12, 25), leaf)
+        braid.remove((12, 25))
+        # Isolated matching outer pixels must share the base strand's path.
+        original.putpixel((14, 53), hair)
+        braid.add((14, 53))
+        for x in range(12, 16):
+            original.putpixel((x, 31), shoe)
+
+        styled, mask, _ = style_skin(original, (180, 90, 160), include_body_hair=True)
+
+        self.assertTrue(braid <= mask, braid - mask)
+        for coordinate in braid:
+            self.assertNotEqual(styled.getpixel(coordinate), original.getpixel(coordinate))
+        self.assertEqual(styled.getpixel((31, 56)), flower)
+        self.assertEqual(styled.getpixel((12, 25)), leaf)
+        for x in range(12, 16):
+            self.assertEqual(styled.getpixel((x, 31)), shoe)
+
+    def test_front_hair_continues_across_waist_to_aligned_leg(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        for y in range(20, 32):
+            original.putpixel((20, y), hair)
+            original.putpixel((4, y), hair)
+        mask = detect_body_hair_mask(original)
+        self.assertIn((4, 20), mask)
+        self.assertIn((4, 31), mask)
+
+    def test_matching_leg_pixels_need_hair_reaching_the_waist(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        for y in range(20, 28):
+            original.putpixel((20, y), hair)
+        for y in range(20, 32):
+            original.putpixel((4, y), hair)
+        mask = detect_body_hair_mask(original)
+        self.assertIn((20, 25), mask)
+        self.assertNotIn((4, 20), mask)
+        self.assertNotIn((4, 31), mask)
+
+    def test_waist_hair_does_not_recolor_broad_matching_trousers(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        for y in range(20, 32):
+            original.putpixel((20, y), hair)
+            for x in range(4, 8):
+                original.putpixel((x, y), hair)
+        mask = detect_body_hair_mask(original)
+        self.assertIn((20, 31), mask)
+        self.assertFalse(mask & {(x, y) for x in range(4, 8) for y in range(20, 32)})
+
+    def test_leg_hair_does_not_jump_to_disconnected_matching_boots(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        for y in range(20, 32):
+            original.putpixel((20, y), hair)
+        for y in (*range(20, 28), *range(30, 32)):
+            original.putpixel((4, y), hair)
+        mask = detect_body_hair_mask(original)
+        self.assertIn((4, 23), mask)
+        self.assertNotIn((4, 30), mask)
+        self.assertNotIn((4, 31), mask)
+
+    def test_short_matching_hems_are_not_leg_hair(self):
+        original = synthetic_skin(hair=(88, 40, 24, 255))
+        hair = (90, 57, 25, 255)
+        for y in range(20, 32):
+            original.putpixel((20, y), hair)
+        for y in range(20, 23):
+            original.putpixel((4, y), hair)
+        mask = detect_body_hair_mask(original)
+        self.assertIn((20, 31), mask)
+        self.assertNotIn((4, 20), mask)
+
+    def test_flesh_like_head_palette_cannot_claim_shaded_legs(self):
+        original = synthetic_skin(hair=(210, 150, 120, 255))
+        shade = (212, 151, 118, 255)
+        for y in range(20, 32):
+            original.putpixel((20, y), shade)
+            original.putpixel((4, y), shade)
+        mask = detect_body_hair_mask(original)
+        self.assertNotIn((4, 20), mask)
+        self.assertNotIn((4, 31), mask)
 
     def test_torso_handoff_rejects_a_similarly_colored_bikini(self):
         original = synthetic_skin(hair=(88, 56, 56, 255))
@@ -603,6 +774,26 @@ class SkinStylerTests(unittest.TestCase):
             self.assertTrue(manifest["skins"]["favorite.png"]["favorite"])
             self.assertEqual(manifest["skins"]["favorite.png"]["tags"], ["casual"])
 
+    def test_generation_excludes_deferred_skins_and_kept_batch_requires_a_decision(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            statuses = ("favorite", "keep", "maybe", "remove", "unsorted")
+            metadata = {f"{status}.png": {"status": status, "tag": "dresses"} for status in statuses}
+            for filename in metadata:
+                synthetic_skin().save(source / filename)
+            originals = {path.name: path.read_bytes() for path in source.glob("*.png")}
+            for batch, expected in (("all", {"keep", "favorite", "unsorted"}),
+                                    ("dresses", {"keep", "favorite", "unsorted"}),
+                                    ("kept", {"keep", "favorite"})):
+                output = root / batch
+                result = generate_folder(source, output, (100, 80, 180), standardize_face=False,
+                                         wardrobe_metadata=metadata, batch_filter=batch)
+                self.assertEqual(result.written, len(expected))
+                self.assertEqual({path.stem for path in output.glob("*.png")}, expected)
+            self.assertEqual(originals, {path.name: path.read_bytes() for path in source.glob("*.png")})
+
     def test_skin_tone_changes_matching_exposed_pixels_only(self):
         original = synthetic_skin()
         # Add a continuous exposed arm matching the face and a green outfit.
@@ -618,6 +809,30 @@ class SkinStylerTests(unittest.TestCase):
         )
         self.assertNotEqual(styled.getpixel((42, 20)), original.getpixel((42, 20)))
         self.assertEqual(styled.getpixel((20, 25)), outfit_before)
+
+    def test_skin_tone_preserves_highlight_detail_near_white(self):
+        from skin_styler_core import recolor_skin_tone
+        original = synthetic_skin()
+        points = [(44, 20), (45, 20), (46, 20), (47, 20)]
+        for point, value in zip(points, (170, 205, 235, 252)):
+            original.putpixel(point, (value, round(value * .8), round(value * .7), 173))
+        styled, _ = recolor_skin_tone(original, (255, 220, 205), skin_mask=set(points))
+        values = [sum(styled.getpixel(point)[:3]) for point in points]
+        self.assertEqual(values, sorted(set(values)))
+        self.assertTrue(all(styled.getpixel(point)[3] == 173 for point in points))
+
+    def test_skin_tone_preserves_pale_shading_with_constant_red(self):
+        from skin_styler_core import recolor_skin_tone
+
+        original = synthetic_skin()
+        points = [(44, 20), (45, 20), (46, 20)]
+        for point, color in zip(points, ((255, 216, 192), (255, 223, 204), (255, 232, 219))):
+            original.putpixel(point, color + (255,))
+        target = (235, 189, 161)
+        styled, _ = recolor_skin_tone(original, target, skin_mask=set(points))
+        shades = [styled.getpixel(point)[:3] for point in points]
+        self.assertEqual(shades[1], target)
+        self.assertGreater(shades[2][1] - shades[0][1], 8)
 
     def test_skin_tone_stops_at_a_pale_swimsuit_edge(self):
         original = synthetic_skin()
@@ -652,6 +867,77 @@ class SkinStylerTests(unittest.TestCase):
         self.assertNotEqual(styled.getpixel((5, 25)), original.getpixel((5, 25)))
         self.assertEqual(styled.getpixel((20, 36)), face_skin)
 
+    def test_skin_shade_confirmed_on_face_and_limbs_reaches_exposed_torso(self):
+        for chin, exposed in (((162, 104, 69), (187, 126, 90)),
+                              ((65, 39, 26), (108, 67, 45))):
+            with self.subTest(chin=chin, exposed=exposed):
+                original = synthetic_skin()
+                draw = ImageDraw.Draw(original)
+                draw.rectangle((8, 10, 15, 15), fill=(*chin, 255))
+                draw.rectangle((11, 14, 12, 15), fill=(*exposed, 255))
+                for box in ((44, 20, 47, 31), (36, 52, 39, 63), (4, 21, 7, 31), (20, 20, 27, 30)):
+                    draw.rectangle(box, fill=(*exposed, 255))
+                draw.rectangle((22, 23, 25, 24), fill=(255, 255, 255, 255))
+                draw.point((22, 40), fill=(*exposed, 255))
+
+                materials = classify_skin_categories(original)
+                self.assertTrue({(23, 28), (45, 24), (5, 26)} <= materials.skin)
+                self.assertIn((23, 23), materials.outfit)
+                self.assertNotIn((22, 40), materials.skin)
+                styled, _, _ = style_skin(original, None, target_skin_color=(238, 184, 158))
+                self.assertNotEqual(styled.getpixel((23, 28)), original.getpixel((23, 28)))
+                self.assertEqual(styled.getpixel((23, 23)), original.getpixel((23, 23)))
+                self.assertEqual(styled.getpixel((22, 40)), original.getpixel((22, 40)))
+
+    def test_back_hair_continues_on_both_layers_beside_similar_sleeves(self):
+        hair = (100, 63, 23, 255)
+        lit_hair = (143, 89, 33, 255)
+        sleeve = (59, 39, 13, 255)
+        original = synthetic_skin(hair=hair)
+        draw = ImageDraw.Draw(original)
+        for box in ((44, 20, 47, 31), (36, 52, 39, 63), (32, 20, 39, 31)):
+            draw.rectangle(box, fill=sleeve)
+        draw.rectangle((27, 8, 28, 15), fill=lit_hair)
+        draw.rectangle((34, 20, 37, 29), fill=hair)
+        draw.rectangle((35, 20, 36, 28), fill=lit_hair)
+        draw.rectangle((35, 36, 36, 44), fill=lit_hair)
+
+        materials = classify_skin_categories(original)
+        self.assertTrue({(35, 28), (35, 44)} <= materials.hair)
+        self.assertTrue({(45, 26), (32, 25), (35, 30)} <= materials.outfit)
+
+    def test_deep_cheek_shades_along_both_arms_are_skin(self):
+        original = synthetic_skin(hair=(18, 18, 18, 255))
+        base = (159, 122, 119, 255)
+        shadow = (126, 95, 93, 255)
+        dark_shadow = (109, 74, 71, 255)
+        dress = (222, 208, 200, 255)
+        eye = (67, 106, 144, 255)
+        draw = ImageDraw.Draw(original)
+        draw.rectangle((8, 8, 15, 15), fill=base)
+        draw.point([(9, 12), (14, 12)], fill=eye)
+        draw.point([(9, 13), (14, 13)], fill=dark_shadow)
+        draw.point([(9, 14), (14, 14)], fill=shadow)
+        for x, y in ((44, 20), (36, 52)):
+            draw.rectangle((x, y, x + 2, y + 11), fill=base)
+            draw.rectangle((x, y + 2, x + 2, y + 3), fill=dress)
+            draw.line((x, y + 4, x, y + 7), fill=dark_shadow)
+            draw.line((x, y + 8, x, y + 11), fill=shadow)
+        draw.point((4, 23), fill=dark_shadow)
+
+        materials = classify_skin_categories(original)
+        self.assertTrue({(9, 13), (14, 14), (44, 25), (36, 61), (4, 23)} <= materials.skin)
+        self.assertTrue({(9, 12), (14, 12)} <= materials.eyes)
+        self.assertIn((44, 22), materials.outfit)
+
+        styled, _, _ = style_skin(original, None, target_skin_color=(241, 190, 172))
+        self.assertNotEqual(styled.getpixel((44, 25)), dark_shadow)
+        self.assertEqual(styled.getpixel((44, 22)), dress)
+        self.assertLess(styled.getpixel((44, 25))[0], styled.getpixel((45, 25))[0])
+
+        draw.rectangle((36, 56, 38, 63), fill=base)
+        self.assertNotIn((4, 23), classify_skin_categories(original).skin)
+
     def test_outfit_palette_colorizes_neutral_fabric_without_touching_skin(self):
         original = synthetic_skin()
         neutral = (238, 238, 238, 255)
@@ -673,6 +959,28 @@ class SkinStylerTests(unittest.TestCase):
         )
         self.assertGreater(saturation, 0.35)
         self.assertEqual(styled.getpixel((11, 13)), face_before)
+
+    def test_outfit_recolor_respects_muted_swatch_on_mixed_fabric(self):
+        target = (72, 126, 143)
+        for fabric in ((26, 26, 26), (144, 62, 62)):
+            with self.subTest(fabric=fabric):
+                original = Image.new("RGBA", (64, 64))
+                points = [(20 + x, 20 + y) for y in range(2) for x in range(8)]
+                colors = [(0, 0, 0)] * 8 + [fabric] * 4 + [(246, 246, 246)] * 4
+                for point, color in zip(points, colors):
+                    original.putpixel(point, (*color, 172))
+                styled, _, _ = style_skin(original, None, target_outfit_color=target,
+                                          category_overrides=dict.fromkeys(points, "outfit"))
+                shadow, midtone, highlight = [styled.getpixel(points[i]) for i in (0, 8, 12)]
+                self.assertLess(sum(shadow[:3]), sum(midtone[:3]))
+                self.assertLess(sum(midtone[:3]), sum(highlight[:3]))
+                self.assertLessEqual(max(highlight[:3]), 183)
+                target_saturation = 1 - min(target) / max(target)
+                for red, green, blue, alpha in (shadow, midtone, highlight):
+                    self.assertLess(red, green)
+                    self.assertLess(green, blue)
+                    self.assertEqual(alpha, 172)
+                    self.assertLessEqual(1 - red / blue, target_saturation + .03)
 
     def test_hair_accessory_palette_is_independent_from_hair(self):
         original = synthetic_skin(hair=(105, 55, 30, 255))

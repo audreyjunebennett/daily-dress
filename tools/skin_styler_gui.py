@@ -23,6 +23,7 @@ from skin_styler_core import (
     render_front_face,
     render_player_3d,
     style_skin,
+    wardrobe_batch_includes,
 )
 from wardrobe_picker import PickerState, TAGS
 
@@ -90,8 +91,11 @@ class SkinStylerApp(tk.Tk):
         super().__init__()
         apply_minecraft_theme(self)
         self.title("Daily Dress Skin Styler ✿")
-        self.geometry("1460x1000")
-        self.minsize(1180, 900)
+        # Start large enough for the three-part workflow, but let the work
+        # area consume additional monitor height instead of leaving a large
+        # empty void below the panels.
+        self.geometry("1900x1040")
+        self.minsize(1360, 760)
 
         pictures = Path.home() / "Pictures"
         profile = _find_modrinth_profile()
@@ -158,6 +162,12 @@ class SkinStylerApp(tk.Tk):
         self._slider_undo_stack: list[dict[str, float]] = []
         self._slider_redo_stack: list[dict[str, float]] = []
         self._active_slider_snapshot: dict[str, float] | None = None
+        self._autosave_job: str | None = None
+        self._autosave_running = False
+        self._autosave_pending = False
+        self._source_feedback_job: str | None = None
+        self._source_toast: tk.Toplevel | None = None
+        self._autosave_ready = False
 
         self._build()
         self.bind("<Control-z>", self._undo_sliders)
@@ -170,6 +180,17 @@ class SkinStylerApp(tk.Tk):
         self.skin_tolerance_var.trace_add("write", self._refresh_tolerance_labels)
         self.reference_var.trace_add("write", self._refresh_reference_preview)
         self.input_var.trace_add("write", self._source_wardrobe_changed)
+        for variable in (
+            self.output_var, self.reference_var, self.hair_var, self.skin_var,
+            self.hair_hue_var, self.hair_saturation_var, self.hair_lightness_var,
+            self.tolerance_var, self.skin_tolerance_var, self.adaptive_detection_var,
+            self.body_hair_var, self.skin_enabled_var, self.outfit_enabled_var,
+            self.accessory_enabled_var, self.face_var, self.eyes_over_bangs_var,
+            self.preserve_hat_lashes_var, self.sync_var,
+            self.outfit_hue_var, self.outfit_saturation_var, self.outfit_brightness_var,
+            self.accessory_hue_var, self.accessory_saturation_var, self.accessory_brightness_var,
+        ):
+            variable.trace_add("write", self._schedule_autosave)
         self.face_var.trace_add("write", self._refresh_hair_preview)
         self.eyes_over_bangs_var.trace_add("write", self._refresh_hair_preview)
         self.preserve_hat_lashes_var.trace_add("write", self._refresh_hair_preview)
@@ -183,18 +204,11 @@ class SkinStylerApp(tk.Tk):
         self._refresh_tolerance_labels()
         self._refresh_reference_preview()
         self._source_wardrobe_changed()
+        self._autosave_ready = True
 
     def _build(self) -> None:
         frame = ttk.Frame(self, padding=18, style="Root.TFrame")
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="DAILY DRESS ✿ SKIN STYLER", style="Title.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(
-            frame,
-            text="A cozy Minecraft workbench for sorting outfits, choosing hair + eyes, correcting tricky pixels, and preparing one safe personal sync set. Originals are never changed.",
-            wraplength=1120,
-            style="Muted.TLabel",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 18))
-
         self._path_row(frame, 2, "Source wardrobe", self.input_var, self._choose_input, folder=True)
         ttk.Label(frame, text="Reference skin").grid(row=3, column=0, sticky="w", pady=5)
         reference_frame = ttk.Frame(frame)
@@ -260,16 +274,6 @@ class SkinStylerApp(tk.Tk):
         hair_reference_buttons = ttk.Frame(color_frame)
         hair_reference_buttons.grid(row=3, column=1, columnspan=4, sticky="ew", pady=(6, 0))
         ttk.Button(hair_reference_buttons, text="Choose a different reference skin", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(side="left")
-        ttk.Label(
-            color_frame,
-            text="Choose one reference skin; adjust these color sliders only if you want to refine it.",
-            style="Muted.TLabel",
-        ).grid(row=4, column=1, columnspan=4, sticky="w", pady=(4, 0))
-        ttk.Label(
-            color_frame,
-            text="Hair detection is automatic. If it guesses wrong, use Re-designate in the workbench.",
-            style="Muted.TLabel",
-        ).grid(row=5, column=1, columnspan=4, sticky="w", pady=(4, 0))
         color_frame.columnconfigure(2, weight=1)
 
         eye_options = ttk.Frame(frame)
@@ -395,11 +399,9 @@ class SkinStylerApp(tk.Tk):
 
         button_frame = ttk.Frame(frame)
         button_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(18, 12))
-        ttk.Button(button_frame, text="Wardrobe workspace", command=lambda: self._show_workbench("wardrobe")).pack(side="left")
-        self.install_button = ttk.Button(button_frame, text="Generate + prepare sync", command=lambda: self._generate(True))
-        self.install_button.pack(side="left", padx=10)
-        self.generate_button = ttk.Button(button_frame, text="Generate only", command=lambda: self._generate(False))
-        self.generate_button.pack(side="left")
+        ttk.Button(button_frame, text="Sort skins", command=lambda: self._show_workbench("wardrobe")).pack(side="left")
+        ttk.Label(button_frame, text="AUTO-SAVE ON", style="Count.TLabel").pack(side="left", padx=(18, 0))
+        ttk.Label(button_frame, text="Changes prepare in the background", style="Muted.TLabel").pack(side="left", padx=(8, 0))
         ttk.Button(button_frame, text="Undo color (Ctrl+Z)", command=self._undo_sliders).pack(side="right")
         ttk.Button(button_frame, text="Redo color (Ctrl+Y)", command=self._redo_sliders).pack(side="right", padx=(0, 7))
 
@@ -408,15 +410,23 @@ class SkinStylerApp(tk.Tk):
         ttk.Label(frame, textvariable=self.status_var, wraplength=850).grid(row=14, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         self._build_workspace(frame)
-        frame.columnconfigure(1, weight=1)
-        frame.columnconfigure(3, minsize=560)
+        frame.columnconfigure(1, weight=1, minsize=260)
+        frame.columnconfigure(3, weight=1, minsize=560)
+        frame.columnconfigure(4, weight=1, minsize=600)
+        # Row 2 is also used by the first path control. Give extra height to
+        # a trailing spacer row instead, so settings remain compact at the
+        # top while the right-hand workbench fills the window.
+        frame.rowconfigure(2, weight=0)
+        frame.rowconfigure(15, weight=1)
 
     def _build_workspace(self, frame: ttk.Frame) -> None:
-        workspace = ttk.LabelFrame(frame, text="2. ORGANIZE + LIVE PREVIEW", padding=10)
-        workspace.grid(row=2, column=3, rowspan=13, sticky="nsew", padx=(18, 0))
-        ttk.Label(workspace, textvariable=self.source_count_var, style="Count.TLabel", wraplength=530).pack(fill="x")
+        library = ttk.LabelFrame(frame, text="SORT SKINS", padding=10)
+        # Keep the workbench panels full-height. The settings column begins
+        # lower down, so this also gives the window a clear visual anchor.
+        library.grid(row=0, column=3, rowspan=16, sticky="nsew", padx=(18, 8))
+        ttk.Label(library, textvariable=self.source_count_var, style="Count.TLabel", wraplength=430).pack(fill="x")
 
-        filter_row = ttk.Frame(workspace)
+        filter_row = ttk.Frame(library)
         filter_row.pack(fill="x", pady=(7, 5))
         ttk.Label(filter_row, text="Working set").pack(side="left")
         ttk.Combobox(
@@ -436,22 +446,56 @@ class SkinStylerApp(tk.Tk):
             width=20,
         ).pack(side="right", fill="x", expand=True, padx=(8, 0))
 
-        self.preview_area = ttk.Frame(workspace)
-        self.preview_area.pack(fill="x")
+        decisions = ttk.Frame(library)
+        decisions.pack(fill="x", pady=(0, 6))
+        ttk.Button(decisions, text="♥ Favorite", command=lambda: self._set_current_status("favorite"), style="Rose.TButton").pack(side="left", fill="x", expand=True)
+        ttk.Button(decisions, text="? Maybe", command=lambda: self._set_current_status("maybe")).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(decisions, text="Unsorted", command=lambda: self._set_current_status("unsorted")).pack(side="left", fill="x", expand=True)
+        ttk.Button(decisions, text="Remove", command=lambda: self._set_current_status("remove"), style="Danger.TButton").pack(side="left", fill="x", expand=True, padx=(4, 0))
+
+        categories = ttk.Frame(library)
+        categories.pack(fill="x", pady=(0, 7))
+        ttk.Label(categories, text="Category").pack(side="left")
+        tag_box = ttk.Combobox(
+            categories,
+            textvariable=self.current_tag_var,
+            values=("dresses", "casual", "seasonal", "other"),
+            state="readonly",
+            width=12,
+        )
+        tag_box.pack(side="left", padx=(7, 5))
+        tag_box.bind("<<ComboboxSelected>>", lambda _event: self._set_current_tag())
+        ttk.Button(categories, text="Re-designate pixels", command=lambda: self._show_workbench("pixels"), style="Accent.TButton").pack(side="right")
+
+        self.workbench_heading = ttk.Label(
+            library,
+            text="SKIN LIBRARY",
+            style="Step.TLabel",
+        )
+        self.workbench_heading.pack(fill="x", pady=(2, 3))
+        self.workbench = IntegratedWorkbench(library, self)
+        self.workbench.pack(fill="both", expand=True)
+
+        preview_workspace = ttk.LabelFrame(frame, text="LIVE PREVIEW · BEFORE / AFTER", padding=12)
+        preview_workspace.grid(row=0, column=4, rowspan=16, sticky="nsew", padx=(8, 0))
+        self.preview_area = ttk.Frame(preview_workspace)
+        self.preview_area.pack(fill="both", expand=True)
 
         preview_box = tk.Frame(
             self.preview_area,
-            width=530,
-            height=250,
+            width=580,
+            height=420,
             background=COLORS["slot"],
             highlightthickness=3,
             highlightbackground=COLORS["stone_dark"],
         )
-        preview_box.pack(fill="x", pady=(4, 5))
+        # The live viewer is the visual anchor of the app. Let it absorb the
+        # spare height so the preview and its controls stay together.
+        preview_box.pack(fill="both", expand=True, pady=(4, 7))
         preview_box.pack_propagate(False)
         self.hair_preview = tk.Label(
             preview_box,
-            text="choose a wardrobe\nto light the workbench",
+            text="choose a wardrobe\nto light the preview",
             background=COLORS["slot"],
             foreground=COLORS["muted"],
             cursor="fleur",
@@ -463,7 +507,7 @@ class SkinStylerApp(tk.Tk):
         ttk.Label(self.preview_area, textvariable=self.sample_position_var, anchor="center").pack(fill="x")
         ttk.Label(self.preview_area, textvariable=self.current_status_var, style="Muted.TLabel", anchor="center").pack(fill="x")
         nav = ttk.Frame(self.preview_area)
-        nav.pack(fill="x", pady=(5, 7))
+        nav.pack(fill="x", pady=(6, 7))
         ttk.Button(nav, text="◀ Previous", command=lambda: self._cycle_sample(-1)).pack(side="left")
         ttk.Button(nav, text="Next ▶", command=lambda: self._cycle_sample(1)).pack(side="right")
         ttk.Button(nav, text="Choose reference", command=lambda: self._show_workbench("hair"), style="Rose.TButton").pack(expand=True)
@@ -486,36 +530,6 @@ class SkinStylerApp(tk.Tk):
             variable=self.no_visible_hair_var,
             command=self._set_current_hair_mode,
         ).pack(anchor="w", pady=(0, 7))
-
-        decisions = ttk.Frame(self.preview_area)
-        decisions.pack(fill="x", pady=(0, 6))
-        ttk.Button(decisions, text="♥ Favorite", command=lambda: self._set_current_status("favorite"), style="Rose.TButton").pack(side="left", fill="x", expand=True)
-        ttk.Button(decisions, text="? Maybe", command=lambda: self._set_current_status("maybe")).pack(side="left", fill="x", expand=True, padx=4)
-        ttk.Button(decisions, text="Unsorted", command=lambda: self._set_current_status("unsorted")).pack(side="left", fill="x", expand=True)
-        ttk.Button(decisions, text="Remove", command=lambda: self._set_current_status("remove"), style="Danger.TButton").pack(side="left", fill="x", expand=True, padx=(4, 0))
-
-        categories = ttk.Frame(self.preview_area)
-        categories.pack(fill="x", pady=(0, 7))
-        ttk.Label(categories, text="Category").pack(side="left")
-        tag_box = ttk.Combobox(
-            categories,
-            textvariable=self.current_tag_var,
-            values=("dresses", "casual", "seasonal", "other"),
-            state="readonly",
-            width=12,
-        )
-        tag_box.pack(side="left", padx=(7, 5))
-        tag_box.bind("<<ComboboxSelected>>", lambda _event: self._set_current_tag())
-        ttk.Button(categories, text="Re-designate pixels", command=lambda: self._show_workbench("pixels"), style="Accent.TButton").pack(side="right")
-
-        self.workbench_heading = ttk.Label(
-            workspace,
-            text="ALL-IN-ONE WORKBENCH · switch tools without opening another window",
-            style="Step.TLabel",
-        )
-        self.workbench_heading.pack(fill="x", pady=(2, 3))
-        self.workbench = IntegratedWorkbench(workspace, self)
-        self.workbench.pack(fill="both", expand=True)
 
     def _history_scale(self, parent: tk.Misc, **options) -> ttk.Scale:
         """Create a scale whose entire mouse drag is one undoable action."""
@@ -610,7 +624,7 @@ class SkinStylerApp(tk.Tk):
 
     def _path_row(self, parent, row, label, variable, command, folder: bool) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=5)
-        ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=(8, 8), pady=5)
+        ttk.Entry(parent, textvariable=variable, width=34).grid(row=row, column=1, sticky="w", padx=(8, 8), pady=5)
         ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, sticky="ew", pady=5)
 
     def _choose_input(self) -> None:
@@ -706,15 +720,64 @@ class SkinStylerApp(tk.Tk):
         if source.is_dir():
             self._sample_paths = sorted(source.rglob("*.png"), key=lambda item: (item.name.casefold(), str(item).casefold()))
             self._picker_state = PickerState(source)
-            self.source_count_var.set(
-                f"Found {len(self._sample_paths)} skin{'s' if len(self._sample_paths) != 1 else ''} · originals stay untouched"
-            )
+            self.source_count_var.set("Source wardrobe ready")
+            if self._autosave_ready:
+                self._show_source_feedback(len(self._sample_paths))
             if self._sample_paths:
                 self._load_hair_sample(self._sample_paths[0])
         else:
-            self.source_count_var.set("Source folder not found yet")
+            self.source_count_var.set("Choose a source wardrobe")
         self.after_idle(self._refresh_hair_preview)
         self._schedule_strip_refresh()
+
+    def _show_source_feedback(self, count: int) -> None:
+        """Show the scan result briefly instead of permanently occupying the UI."""
+
+        if self._source_feedback_job is not None:
+            self.after_cancel(self._source_feedback_job)
+        if self._source_toast is not None and self._source_toast.winfo_exists():
+            self._source_toast.destroy()
+        toast = tk.Toplevel(self)
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+        ttk.Label(
+            toast,
+            text=f"✓ Found {count} skin{'s' if count != 1 else ''}",
+            padding=(12, 7),
+            style="Count.TLabel",
+        ).pack()
+        self._source_toast = toast
+        self.update_idletasks()
+        toast.geometry(f"+{self.winfo_rootx() + 24}+{self.winfo_rooty() + self.winfo_height() - 78}")
+        self.status_var.set(f"Found {count} skin{'s' if count != 1 else ''} in the source wardrobe.")
+        self._source_feedback_job = self.after(4500, lambda: self._clear_source_feedback(toast))
+
+    def _clear_source_feedback(self, toast: tk.Toplevel | None = None) -> None:
+        self._source_feedback_job = None
+        if toast is not None and toast.winfo_exists():
+            toast.destroy()
+        self._source_toast = None
+        self.status_var.set("Auto-save is on. Changes will be prepared in the background.")
+
+    def _schedule_autosave(self, *_args) -> None:
+        if not self._autosave_ready:
+            return
+        if self._autosave_job is not None:
+            self.after_cancel(self._autosave_job)
+        self._autosave_job = self.after(900, self._run_autosave)
+
+    def _run_autosave(self) -> None:
+        self._autosave_job = None
+        if self._autosave_running:
+            self._autosave_pending = True
+            return
+        if not self._sample_paths:
+            return
+        try:
+            self._settings()
+        except (OSError, ValueError):
+            return
+        self._generate(True, automatic=True)
 
     def _reload_wardrobe_state(self) -> None:
         source = Path(self.input_var.get()).expanduser()
@@ -752,23 +815,14 @@ class SkinStylerApp(tk.Tk):
         relative = self._relative_sample(path)
         if relative is None:
             return True
-        saved = self._picker_state.get(relative)
-        if saved["status"] == "remove":
-            return False
-        requested = self._batch_key().split("+")
-        if "favorites" in requested and saved["status"] != "favorite":
-            return False
-        tags = [piece for piece in requested if piece not in ("all", "favorites")]
-        return not tags or saved["tag"] in tags
+        return wardrobe_batch_includes(self._picker_state.get(relative), self._batch_key())
 
     def _working_paths(self) -> list[Path]:
         return [path for path in self._sample_paths if self._path_in_working_set(path)]
 
     def _working_set_changed(self, *_args) -> None:
         working = self._working_paths()
-        self.source_count_var.set(
-            f"Found {len(self._sample_paths)} skins · {len(working)} in “{self.preview_batch_var.get()}”"
-        )
+        self.source_count_var.set(f"Working set: {len(working)} skins · {self.preview_batch_var.get()}")
         if working and self._hair_sample_path not in working:
             self._load_hair_sample(working[0])
         self._schedule_strip_refresh()
@@ -898,6 +952,7 @@ class SkinStylerApp(tk.Tk):
         self.status_var.set(f"Marked {self._hair_sample_path.stem} as {status.title()}; moved to the next skin.")
         self._refresh_current_metadata()
         self._cycle_sample(1)
+        self._schedule_autosave()
 
     def _set_current_tag(self) -> None:
         relative = self._relative_sample()
@@ -908,6 +963,7 @@ class SkinStylerApp(tk.Tk):
         self.status_var.set(f"Categorized {self._hair_sample_path.stem} as {TAGS.get(tag, tag.title())}; moved to the next skin.")
         self._refresh_current_metadata()
         self._cycle_sample(1)
+        self._schedule_autosave()
 
     def _set_current_model(self) -> None:
         relative = self._relative_sample()
@@ -922,6 +978,7 @@ class SkinStylerApp(tk.Tk):
         self._refresh_current_metadata()
         self._refresh_hair_preview()
         self._schedule_strip_refresh()
+        self._schedule_autosave()
 
     def _set_current_hair_mode(self) -> None:
         relative = self._relative_sample()
@@ -931,6 +988,7 @@ class SkinStylerApp(tk.Tk):
         self._refresh_current_metadata()
         self._refresh_hair_preview()
         self._schedule_strip_refresh()
+        self._schedule_autosave()
 
     def _current_model_is_slim(self, image: Image.Image, path: Path | None = None) -> bool:
         relative = self._relative_sample(path)
@@ -948,6 +1006,7 @@ class SkinStylerApp(tk.Tk):
         self._refresh_hair_preview()
         self._schedule_strip_refresh()
         self.status_var.set(f"Saved {len(corrections)} pixel correction(s); the original PNG is unchanged.")
+        self._schedule_autosave()
 
     def _corrections_for(self, path: Path | None) -> dict[tuple[int, int], str]:
         relative = self._relative_sample(path)
@@ -1010,18 +1069,18 @@ class SkinStylerApp(tk.Tk):
             slim = self._current_model_is_slim(self._hair_sample_image, self._hair_sample_path)
             before = render_player_3d(self._hair_sample_image, 6, slim=slim, yaw_degrees=self._preview_yaw)
             after = render_player_3d(styled, 6, slim=slim, yaw_degrees=self._preview_yaw)
-            comparison = Image.new("RGBA", (526, 240), (30, 37, 41, 255))
-            before_x = 140 - before.width // 2
-            after_x = 386 - after.width // 2
-            model_y = max(27, (240 - before.height) // 2 + 8)
+            comparison = Image.new("RGBA", (556, 300), (30, 37, 41, 255))
+            before_x = 145 - before.width // 2
+            after_x = 411 - after.width // 2
+            model_y = max(34, (300 - before.height) // 2 + 8)
             comparison.alpha_composite(before, (before_x, model_y))
             comparison.alpha_composite(after, (after_x, model_y))
             draw = ImageDraw.Draw(comparison)
-            draw.text((140, 14), "ORIGINAL", fill=(200, 191, 167, 255), anchor="mm")
-            draw.text((386, 14), "STYLED", fill=(244, 201, 93, 255), anchor="mm")
-            draw.line((246, 120, 268, 120), fill=(217, 122, 174, 255), width=4)
-            draw.polygon(((268, 111), (283, 120), (268, 129)), fill=(217, 122, 174, 255))
-            draw.text((263, 228), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
+            draw.text((145, 18), "ORIGINAL", fill=(200, 191, 167, 255), anchor="mm")
+            draw.text((411, 18), "STYLED", fill=(244, 201, 93, 255), anchor="mm")
+            draw.line((251, 150, 273, 150), fill=(217, 122, 174, 255), width=4)
+            draw.polygon(((273, 141), (288, 150), (273, 159)), fill=(217, 122, 174, 255))
+            draw.text((278, 283), f"drag to rotate · {round(self._preview_yaw) % 360}° · {'slim' if slim else 'classic'} arms", fill=(200, 191, 167, 255), anchor="mm")
             self._hair_preview_image = ImageTk.PhotoImage(comparison)
             self.hair_preview.configure(image=self._hair_preview_image, text="")
             self._refresh_current_metadata()
@@ -1196,17 +1255,20 @@ class SkinStylerApp(tk.Tk):
             return [("your Minecraft sync outbox", self.sync_outbox)]
         return []
 
-    def _generate(self, install: bool) -> None:
+    def _generate(self, install: bool, automatic: bool = False) -> None:
+        if self._autosave_running:
+            self._autosave_pending = True
+            return
         try:
             settings = self._settings()
             install_targets = self._selected_install_targets() if install else []
-            if install and not install_targets:
+            if install and not automatic and not install_targets:
                 raise ValueError("Enable automatic personal wardrobe sync")
         except Exception as exception:
             messagebox.showerror("Cannot generate", str(exception))
             return
 
-        if install:
+        if install and not automatic:
             destinations = "\n".join(f"• {label}" for label, _path in install_targets)
             confirmed = messagebox.askokcancel(
                 "Generate and prepare sync?",
@@ -1216,10 +1278,9 @@ class SkinStylerApp(tk.Tk):
             if not confirmed:
                 return
 
-        self.generate_button.configure(state="disabled")
-        self.install_button.configure(state="disabled")
+        self._autosave_running = True
         self.progress["value"] = 0
-        self.status_var.set("Starting…")
+        self.status_var.set("Auto-saving styled wardrobe…" if automatic else "Starting…")
 
         def progress(current: int, total: int, path: Path) -> None:
             self.after(0, lambda: self._set_progress(current, total, path.name))
@@ -1276,8 +1337,7 @@ class SkinStylerApp(tk.Tk):
         self.status_var.set(f"{current}/{total}: {name}")
 
     def _finished(self, result, output_folder: Path, installations) -> None:
-        self.generate_button.configure(state="normal")
-        self.install_button.configure(state="normal")
+        self._autosave_running = False
         summary = f"Created {result.written} styled skins in:\n{output_folder}\n\nNormalized {result.normalized} HD skin(s)."
         if result.skipped:
             summary += f"\nSkipped {len(result.skipped)} file(s); see the styling manifest."
@@ -1289,14 +1349,19 @@ class SkinStylerApp(tk.Tk):
                 "\n\nThe previous outbox was backed up first. Join Roses with the account this wardrobe belongs to; "
                 "Daily Dress will sync it automatically, usually within a few seconds, and keep that player separate from everyone else."
             )
-        self.status_var.set(summary.replace("\n", " "))
-        messagebox.showinfo("Styled wardrobe ready ✿", summary)
+        self.status_var.set(("Auto-saved " if self._autosave_pending else "Saved ") + f"{result.written} styled skins.")
+        if self._autosave_pending:
+            self._autosave_pending = False
+            self._schedule_autosave()
 
     def _failed(self, exception: Exception) -> None:
-        self.generate_button.configure(state="normal")
-        self.install_button.configure(state="normal")
+        self._autosave_running = False
         self.status_var.set("Generation stopped.")
-        messagebox.showerror("Could not generate wardrobe", str(exception))
+        if self._autosave_pending:
+            self._autosave_pending = False
+            self._schedule_autosave()
+        else:
+            messagebox.showerror("Could not generate wardrobe", str(exception))
 
 
 if __name__ == "__main__":

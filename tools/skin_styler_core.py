@@ -1,8 +1,8 @@
 """Pixel-exact Minecraft skin styling for Daily Dress.
 
 The source wardrobe is never modified. Every output is normalized to a 64x64
-RGBA PNG. Hair color detection is deliberately constrained to the two head UV
-regions, so outfit pixels elsewhere on the skin cannot be recolored.
+RGBA PNG. Body-length hair is traced from confirmed head/torso strands across
+the model's UV seams, rather than matching hair-colored outfit pixels globally.
 """
 
 from __future__ import annotations
@@ -120,20 +120,25 @@ def detect_skin_model(image: Image.Image) -> str:
 
     normalized, _ = normalize_skin(image)
     pixels = normalized.load()
-    discriminator_strips = (
-        ((54, 20), (55, 31)),
-        ((46, 52), (47, 63)),
-        ((50, 16), (51, 19)),
-        ((42, 48), (43, 51)),
-    )
-    transparent = 0
-    total = 0
-    for (left, top), (right, bottom) in discriminator_strips:
-        for y in range(top, bottom + 1):
-            for x in range(left, right + 1):
-                total += 1
-                transparent += int(pixels[x, y][3] < 48)
-    return "slim" if transparent >= max(4, round(total * 0.55)) else "classic"
+    strips = ((54, 20, 12), (46, 52, 12), (50, 16, 4), (42, 48, 4))
+    padding = [pixels[x, y] for left, top, height in strips
+               for x in range(left, left + 2) for y in range(top, top + height)]
+    if sum(pixel[3] < 48 for pixel in padding) >= round(len(padding) * .55):
+        return "slim"
+
+    # Some editors fill the unused UV space with opaque black. Require that
+    # pattern on both arms and caps, with a clear boundary to the painted arm.
+    if all(pixel[3] < 48 or pixel[:3] == (0, 0, 0) for pixel in padding) and all(
+        sum(pixels[x, y][3] >= 48 and max(pixels[x, y][:3]) >= 24
+            for x in range(left - 2, left) for y in range(top, top + height)) >= height * 1.5
+        for left, top, height in strips
+    ):
+        return "slim"
+    return "classic"
+
+
+def resolve_skin_model(image: Image.Image, preference: str = "auto") -> str:
+    return preference if preference in ("slim", "classic") else detect_skin_model(image)
 
 
 def recommended_hair_tolerance(image: Image.Image, fallback: float = 42.0) -> float:
@@ -854,8 +859,168 @@ def _prune_torso_hair_handoffs(
     return (mask - torso_coordinates) | retained
 
 
+def _detect_leg_hair(
+    skin: Image.Image,
+    torso_mask: set[tuple[int, int]],
+    palette: tuple[RGB, ...],
+    protected_skin: set[tuple[int, int]],
+    tolerance: float,
+) -> set[tuple[int, int]]:
+    """Continue proven waist-length strands onto anatomically aligned legs.
+
+    Stitch the two legs into one surface before tracing: a braid can zigzag
+    across their center seam even though those pixels are far apart in the PNG.
+    Base and outer layers share a path, but only palette-matched pixels on each
+    layer enter the mask. Flowers may interrupt a strand without being dyed.
+    """
+
+    pixels = skin.load()
+    skin_center = _median_skin_color(skin, detect_hair_mask(skin, tolerance))
+    # Hair/base skins sometimes supply flesh as the dominant head palette.
+    # Blonde hair can also be indistinguishable from flesh at this resolution.
+    # Prefer leaving an ambiguous leg alone over coloring skin or pale shorts.
+    if not palette or _distance(palette[0], skin_center) < 35.0:
+        return set()
+
+    def skin_like(color: RGB) -> bool:
+        # The ordinary anatomical mask is intentionally tight. On legs, be
+        # more cautious about shaded flesh resembling warm/blonde hair.
+        distance = _distance(color, skin_center)
+        return distance < 40.0 or (
+            distance < 85.0
+            and _same_hue_shading_family(color, (skin_center,), 14.0, 0.15)
+            and not _strict_hair_match(color, palette, 12.0)
+        )
+
+    # Torso base/outer, then leg base/outer faces in rendered left-to-right order.
+    surfaces = (
+        (TORSO_FRONT, TORSO_OVERLAY_FRONT,
+         (((4, 20, 8, 32), (4, 36, 8, 48)),
+          ((20, 52, 24, 64), (4, 52, 8, 64)))),
+        (TORSO_BACK, TORSO_OVERLAY_BACK,
+         (((28, 52, 32, 64), (12, 52, 16, 64)),
+          ((12, 20, 16, 32), (12, 36, 16, 48)))),
+        (TORSO_RIGHT, TORSO_OVERLAY_RIGHT,
+         (((0, 20, 4, 32), (0, 36, 4, 48)),)),
+        (TORSO_LEFT, TORSO_OVERLAY_LEFT,
+         (((24, 52, 28, 64), (8, 52, 12, 64)),)),
+    )
+    recovered: set[tuple[int, int]] = set()
+    for torso_base, torso_outer, legs in surfaces:
+        width = torso_base[2] - torso_base[0]
+        seed_colors: dict[int, tuple[RGB, ...]] = {}
+        for local_x in range(width):
+            # Require a sustained strand reaching the waist, not a single
+            # matching belt pixel or a hairstyle that ends above the hips.
+            rows = {
+                local_y
+                for local_y in range(8, 12)
+                if any((box[0] + local_x, box[1] + local_y) in torso_mask
+                       for box in (torso_base, torso_outer))
+            }
+            if 11 not in rows or len(rows) < 3:
+                continue
+            seed_colors[local_x] = tuple(
+                pixels[box[0] + local_x, box[1] + local_y][:3]
+                for box in (torso_base, torso_outer)
+                for local_y in (10, 11)
+                if (box[0] + local_x, box[1] + local_y) in torso_mask
+            )
+        # Broad waist coverage is too ambiguous (dress, belt or trousers).
+        if not seed_colors or len(seed_colors) > width - 2:
+            continue
+
+        stitched = Image.new("RGBA", (width, 12))
+        sources: dict[tuple[int, int], list[tuple[int, int]]] = {}
+        for leg_index, layer_boxes in enumerate(legs):
+            leg_sources: dict[tuple[int, int], list[tuple[int, int]]] = {}
+            for local_y in range(12):
+                for local_x in range(4):
+                    matched = [
+                        (box[0] + local_x, box[1] + local_y)
+                        for box in layer_boxes
+                        if (box[0] + local_x, box[1] + local_y) not in protected_skin
+                        and pixels[box[0] + local_x, box[1] + local_y][3] >= 48
+                        and not skin_like(pixels[box[0] + local_x, box[1] + local_y][:3])
+                        and _strict_hair_match(
+                            pixels[box[0] + local_x, box[1] + local_y][:3],
+                            palette, 32.0,
+                        )
+                        and (
+                            _strict_hair_match(pixels[box[0] + local_x, box[1] + local_y][:3], palette, 16.0)
+                            or _same_hue_shading_family(
+                                pixels[box[0] + local_x, box[1] + local_y][:3],
+                                palette, 18.0, 0.22,
+                            )
+                        )
+                    ]
+                    if matched:
+                        leg_sources[(leg_index * 4 + local_x, local_y)] = matched
+            # A repeated full-width leg panel is more likely trousers/boots
+            # than a lock of hair. Do not let a waist seed flood that garment.
+            full_rows = sum(
+                all((leg_index * 4 + x, y) in leg_sources for x in range(4))
+                for y in range(12)
+            )
+            if full_rows >= 3:
+                continue
+            sources.update(leg_sources)
+        for coordinate, matched in sources.items():
+            stitched.putpixel(coordinate, pixels[matched[0][0], matched[0][1]])
+        traced = _trace_surface_hair_paths(
+            stitched, (0, 0, width, 12), palette, set(seed_colors),
+            tolerance, 1, None, seed_colors,
+        )
+        # Short hems and shorts can sit directly below a confirmed strand.
+        # Demand a clear calf-length lock, not a matching hem or short skirt.
+        # Ambiguous shorter extensions remain available for manual correction.
+        if len({y for _x, y in traced}) < 8:
+            continue
+        for coordinate in traced:
+            recovered.update(sources[coordinate])
+    return recovered
+
+
+def _recover_back_hair(
+    skin: Image.Image,
+    head_mask: set[tuple[int, int]],
+    sleeve_colors: tuple[RGB, ...],
+    protected_skin: set[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    """Follow back-of-head shades that can be distinguished from the sleeves."""
+
+    pixels = skin.load()
+    seam = _head_to_body_seed_colors(skin, head_mask, (24, 8, 32, 16), (56, 8, 64, 16), 8)
+    shades = tuple({color for colors in seam.values() for color in colors
+                    if max(color) - min(color) >= 19
+                    and not _strict_hair_match(color, sleeve_colors, 12.0)})
+    if len(seam) < 4 or not shades:
+        return set()
+
+    result: set[tuple[int, int]] = set()
+    for box in (TORSO_BACK, TORSO_OVERLAY_BACK):
+        candidates = {
+            (x, y) for x, y in _box_coordinates(box) - protected_skin
+            if pixels[x, y][3] >= 48
+            and (
+                _strict_hair_match(pixels[x, y][:3], shades, 13.0)
+                if sleeve_colors
+                else _same_hue_shading_family(pixels[x, y][:3], shades, 14.0, .21)
+            )
+            and not _strict_hair_match(pixels[x, y][:3], sleeve_colors, 12.0)
+        }
+        left, top, _right, _bottom = box
+        seeds = {
+            (x, y) for x, y in candidates
+            if y <= top + 1 and _strict_hair_match(pixels[x, y][:3], seam.get(x - left, ()), 19.0)
+        }
+        if len({x for x, _y in seeds}) >= 2:
+            result.update(_trace_skin_region(candidates, candidates, seeds, pixels, 31.0))
+    return result
+
+
 def detect_body_hair_mask(skin: Image.Image, tolerance: float = 42.0) -> set[tuple[int, int]]:
-    """Conservatively find long hair painted down torso UVs.
+    """Conservatively find long hair painted down torso and leg UVs.
 
     Front strands must descend from the shoulder area and stay near the sides;
     broad central clothing is deliberately excluded even when it shares a hue.
@@ -981,7 +1146,12 @@ def detect_body_hair_mask(skin: Image.Image, tolerance: float = 42.0) -> set[tup
     # counterpart from which it can grow back.
     torso = _link_aligned_torso_hair_layers(normalized, torso, core, tolerance)
     shoulder = _detect_shoulder_hair(normalized, head_mask, torso, core, tolerance)
-    return (torso | shoulder) - protected_skin
+    legs = _detect_leg_hair(normalized, torso - protected_skin, core, protected_skin, tolerance)
+    pale_neutral_core = not core_has_hue and any(max(color) >= 180 for color in core)
+    if clothing_conflict or pale_neutral_core:
+        sleeve_colors = tuple({pixels[x, y][:3] for x, y in non_skin_arm_samples}) if clothing_conflict else ()
+        torso |= _recover_back_hair(normalized, head_mask, sleeve_colors, protected_skin)
+    return (torso | shoulder | legs) - protected_skin
 
 
 def recolor_hair(
@@ -1035,7 +1205,15 @@ def recolor_hair(
     source_saturation = max(0.03, statistics.median(source_saturations) if source_saturations else 0.03)
     source_value = max(0.03, statistics.median(source_values))
     saturation_scale = min(4.0, max(0.05, target_saturation / source_saturation))
+    # Transfer the source hair's *relative* lightness around its median to
+    # the chosen color. A global brightness scale can invert a source
+    # gradient when the target swatch is brighter than the brown midtones.
+    # Keep the old scale for very dark/neutral hair, where lighting detail is
+    # less reliable and users expect the familiar vivid dye result.
+    preserve_gradient = source_value >= 0.18 and source_saturation >= 0.08 and len(source_values) >= 8
     value_scale = min(3.0, max(0.15, target_value / source_value))
+    source_spread = (statistics.quantiles(source_values, n=4, method="inclusive")[2]
+                     - statistics.quantiles(source_values, n=4, method="inclusive")[0]) if len(source_values) >= 4 else 0.0
 
     for x, y in mask:
         red, green, blue, alpha = source[x, y]
@@ -1058,10 +1236,49 @@ def recolor_hair(
         else:
             new_hue = (old_hue + hue_shift) % 1.0
             new_saturation = min(1.0, old_saturation * saturation_scale)
-        new_value = min(1.0, old_value * value_scale)
+        if preserve_gradient:
+            relative_value = old_value / source_value
+            new_value = target_value * (relative_value ** 0.82)
+            # Avoid clipping the brightest strands into a flat plateau while
+            # retaining broad highlight and shadow separation.
+            new_value = min(1.0, max(0.025, new_value))
+        else:
+            new_value = min(1.0, old_value * value_scale)
         changed = colorsys.hsv_to_rgb(new_hue, new_saturation, new_value)
         destination[x, y] = tuple(round(channel * 255) for channel in changed) + (alpha,)
     return result, mask
+
+
+def _recolor_outfit(skin: Image.Image, target: RGB, mask: set[tuple[int, int]]) -> Image.Image:
+    """Shade the selected swatch from the source fabric's light and dark detail."""
+    if not mask:
+        return skin
+    result = skin.copy()
+    pixels = result.load()
+    shades = {}
+    for x, y in mask:
+        red, green, blue, _alpha = pixels[x, y]
+        shades[x, y] = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+
+    # Let actual fabric establish the midtone, even on an outfit with heavy
+    # black trim. This keeps white panels from being amplified to full cyan.
+    fabric = [shade for shade in shades.values() if shade >= .04]
+    midtone = statistics.median(fabric) if fabric else .10
+    peak = max(target)
+    muted = tuple(channel * .68 + peak * .32 for channel in target)
+    for (x, y), shade in shades.items():
+        red, green, blue, alpha = pixels[x, y]
+        lightest = max(red, green, blue)
+        neutral = lightest - min(red, green, blue) <= lightest * .04
+        pigment = muted if neutral else target
+        if shade < midtone:
+            strength = .15 + .85 * shade / midtone
+            colored = tuple(round(channel * strength) for channel in pigment)
+        else:
+            highlight = .23 * (shade - midtone) / max(.25, 1 - midtone)
+            colored = tuple(round(channel + (255 - channel) * highlight) for channel in pigment)
+        pixels[x, y] = (*colored, alpha)
+    return result
 
 
 def _median_skin_color(skin: Image.Image, hair_mask: set[tuple[int, int]]) -> RGB:
@@ -1185,6 +1402,81 @@ def _trace_skin_region(
     return connected
 
 
+def _confirmed_skin_shades(pixels, center: RGB, tolerance: float) -> tuple[RGB, ...]:
+    """Confirm extra face shades against exposed areas on separate limbs."""
+
+    face_samples = [
+        pixels[x, y][:3]
+        for x, y in (*((x, 15) for x in range(9, 15)), (11, 14), (12, 14), (11, 13), (12, 13))
+        if pixels[x, y][3] >= 128
+    ]
+    limb_bands = (
+        (40, 56, (30, 31)), (32, 48, (62, 63)),
+        (0, 16, (20, 21, 30, 31)), (16, 32, (52, 53, 62, 63)),
+    )
+    limb_colors = [
+        Counter(pixels[x, y][:3] for x in range(left, right) for y in rows if pixels[x, y][3] >= 128)
+        for left, right, rows in limb_bands
+    ]
+    # The face supplies the candidate; the limbs supply independent evidence
+    # that it is a skin shade. Keep the new neighborhoods narrow so similar
+    # swimwear and warm hair don't enter through a wider global tolerance.
+    confirmed = []
+    for color in set(face_samples):
+        if not (tolerance * .52 < _distance(color, center) <= tolerance * 1.9):
+            continue
+        if not _same_hue_shading_family(color, (center,), 16.0, .22):
+            continue
+        if sum(_distance(color, shade) <= 6.0 for shade in face_samples) < 2:
+            continue
+        matches = [sum(count for shade, count in band.items() if _distance(color, shade) <= 6.0)
+                   for band in limb_colors]
+        cross_check = max(matches[:2]) >= 7 and max(matches[2:]) >= 7
+        dominates_a_pair = any(
+            all(matches[i] >= 12 and matches[i] * 2 >= limb_colors[i].total() for i in pair)
+            for pair in ((0, 1), (2, 3))
+        )
+        if cross_check or dominates_a_pair:
+            confirmed.append(color)
+    return tuple(confirmed)
+
+
+def _confirmed_arm_shadows(pixels, center: RGB, tolerance: float) -> tuple[RGB, ...]:
+    """Find deeper cheek shades that run beside exposed skin on both arms."""
+
+    cheeks = Counter(
+        pixels[x, y][:3]
+        for x in range(9, 15) for y in range(13, 16)
+        if pixels[x, y][3] >= 128
+    )
+    if not any(tolerance < _distance(color, center) <= tolerance * 2.4 for color in cheeks):
+        return ()
+
+    def runs_beside_skin(color: RGB, arm_x: int, arm_y: int) -> bool:
+        # The front starts four texels into the arm strip for either arm size.
+        # Use its first three columns so both slim and classic skins stay on
+        # the same face. Require a vertical seam, as a cuff touches skin in
+        # only one row and solid sleeves have no adjacent exposed skin here.
+        rows = 0
+        for y in range(arm_y + 4, arm_y + 12):
+            row = [pixels[x, y] for x in range(arm_x + 4, arm_x + 7)]
+            shadow = [p[3] >= 128 and _distance(p[:3], color) <= 6.0 for p in row]
+            exposed = [p[3] >= 128 and _distance(p[:3], center) <= 13.0 for p in row]
+            if any((shadow[i] and exposed[i + 1]) or (exposed[i] and shadow[i + 1]) for i in (0, 1)):
+                rows += 1
+        return rows >= 3
+
+    return tuple(
+        color for color in cheeks
+        if tolerance < _distance(color, center) <= tolerance * 2.4
+        and all(shadow < base for shadow, base in zip(color, center))
+        and _same_hue_shading_family(color, (center,), 14.0, .22)
+        and sum(count for shade, count in cheeks.items() if _distance(color, shade) <= 6.0) >= 2
+        and runs_beside_skin(color, 40, 20)
+        and runs_beside_skin(color, 32, 52)
+    )
+
+
 def detect_skin_mask(
     skin: Image.Image,
     hair_mask: set[tuple[int, int]] | None = None,
@@ -1197,6 +1489,8 @@ def detect_skin_mask(
         hair_mask = detect_hair_mask(normalized)
     center = _median_skin_color(normalized, hair_mask)
     pixels = normalized.load()
+    shades = _confirmed_skin_shades(pixels, center, tolerance) + _confirmed_arm_shadows(pixels, center, tolerance)
+    confirmed: set[tuple[int, int]] = set()
     candidates: set[tuple[int, int]] = set()
     for y in range(64):
         for x in range(64):
@@ -1204,9 +1498,11 @@ def detect_skin_mask(
             if alpha < 48:
                 continue
             color = (red, green, blue)
-            if _distance(color, center) > tolerance:
-                continue
-            candidates.add((x, y))
+            coordinate = (x, y)
+            if shades and any(_distance(color, shade) <= 6.0 for shade in shades):
+                confirmed.add(coordinate)
+            if coordinate in confirmed or _distance(color, center) <= tolerance:
+                candidates.add(coordinate)
 
     # Forehead skin must connect back to the reliable lower face. This reaches
     # skin between bangs without reclaiming a similarly colored isolated bang.
@@ -1221,6 +1517,7 @@ def detect_skin_mask(
         coordinate
         for coordinate in face_candidates & hair_mask
         if crown_palette
+        and coordinate not in confirmed
         and min(
             _distance(pixels[coordinate[0], coordinate[1]][:3], hair_color)
             for hair_color in crown_palette
@@ -1273,7 +1570,7 @@ def detect_skin_mask(
     def core(coordinate: tuple[int, int]) -> bool:
         return (
             coordinate in body_candidates
-            and _distance(pixels[coordinate[0], coordinate[1]][:3], center) <= core_limit
+            and (coordinate in confirmed or _distance(pixels[coordinate[0], coordinate[1]][:3], center) <= core_limit)
         )
 
     # Head base pixels are already protected by the hair mask; retain the
@@ -1296,7 +1593,7 @@ def detect_skin_mask(
     mask.update(
         coordinate
         for coordinate in body_candidates & anatomical_region
-        if _distance(pixels[coordinate[0], coordinate[1]][:3], center) <= core_limit
+        if core(coordinate)
     )
 
     # Torso skin begins at the neckline. A genuinely bare midriff can also begin
@@ -1351,22 +1648,26 @@ def recolor_skin_tone(
     if not mask:
         return result, mask
 
-    values = []
-    for x, y in mask:
-        red, green, blue, _alpha = source[x, y]
-        _hue, _saturation, value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
-        values.append(value)
-    median_value = max(0.08, statistics.median(values))
-    target_hue, target_saturation, target_value = colorsys.rgb_to_hsv(*(channel / 255 for channel in target))
-    value_scale = min(2.5, max(0.35, target_value / median_value))
+    def brightness(rgb: RGB) -> float:
+        red, green, blue = rgb
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
+    # Pale skin can have the same red channel in every shade. Measure all
+    # three channels so variations in green and blue still carry the shading.
+    median = statistics.median(brightness(source[point][:3]) for point in mask)
+    target_brightness = brightness(target)
+    highlight_scale = min(1.0, (255 - target_brightness) / max(1.0, 255 - median))
+    shadow_scale = min(1.0, target_brightness / max(1.0, median))
     for x, y in mask:
-        red, green, blue, alpha = source[x, y]
-        _old_hue, old_saturation, old_value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
-        new_saturation = min(1.0, target_saturation * 0.88 + old_saturation * 0.12)
-        new_value = min(1.0, max(0.03, old_value * value_scale))
-        changed = colorsys.hsv_to_rgb(target_hue, new_saturation, new_value)
-        destination[x, y] = tuple(round(channel * 255) for channel in changed) + (alpha,)
+        pixel = source[x, y]
+        offset = brightness(pixel[:3]) - median
+        if offset >= 0:
+            fraction = offset * highlight_scale / max(1.0, 255 - target_brightness)
+            changed = tuple(round(channel + (255 - channel) * fraction) for channel in target)
+        else:
+            fraction = -offset * shadow_scale / max(1.0, target_brightness)
+            changed = tuple(round(channel * (1 - fraction)) for channel in target)
+        destination[x, y] = changed + (pixel[3],)
     return result, mask
 
 
@@ -1551,11 +1852,15 @@ def detect_outfit_mask(
     }
 
 
-def representative_hair_color(skin: Image.Image, tolerance: float = 42.0) -> RGB:
+def representative_hair_color(
+    skin: Image.Image, tolerance: float = 42.0, *, hair_mask: set[tuple[int, int]] | None = None,
+) -> RGB:
     """Return a useful target swatch sampled from a skin's detected hairstyle."""
 
     normalized, _ = normalize_skin(skin)
-    mask = detect_hair_mask(normalized, recommended_hair_tolerance(normalized, tolerance))
+    mask = (detect_hair_mask(normalized, recommended_hair_tolerance(normalized, tolerance))
+            if hair_mask is None else hair_mask)
+    mask = {(x, y) for x, y in mask if y < 16 and normalized.getpixel((x, y))[3] >= 48}
     if not mask:
         raise ValueError("No visible hair could be detected in that skin")
     hue, saturation, value = _hair_hsv_center(normalized, mask)
@@ -1573,16 +1878,15 @@ def classify_skin_categories(
 
     normalized, _ = normalize_skin(skin)
     head_hair = detect_hair_mask(normalized, tolerance)
-    anatomical_skin = detect_skin_mask(normalized, head_hair, skin_tolerance)
+    skin_mask = detect_skin_mask(normalized, head_hair, skin_tolerance)
     body_hair = detect_body_hair_mask(normalized, tolerance) if include_body_hair else set()
     combined_hair = head_hair | body_hair
-    skin_mask = detect_skin_mask(normalized, combined_hair, skin_tolerance) | anatomical_skin
     accessory = detect_hair_accessory_mask(normalized, head_hair, body_hair, skin_mask)
     effective_hair = combined_hair - skin_mask - accessory
     outfit = detect_outfit_mask(normalized, effective_hair, skin_mask, accessory)
     skin_color = _median_skin_color(normalized, head_hair)
     eye_anchor = detect_eye_anchor(normalized, skin_color)
-    eyes = _bilateral_eye_features(normalized, skin_color, eye_anchor) - effective_hair
+    eyes = _bilateral_eye_features(normalized, skin_color, eye_anchor) - effective_hair - skin_mask
     eyes |= {(x + 32, y) for x, y in eyes if 40 <= x + 32 < 48}
     skin_mask -= eyes
     outfit -= eyes
@@ -1664,6 +1968,30 @@ def make_face_template(reference: Image.Image, hair_tolerance: float = 42.0) -> 
     )
 
 
+def _split_dye_dark_strands(skin: Image.Image, hair: set[tuple[int, int]]) -> set[tuple[int, int]]:
+    """Keep a distinct black section of split-dye hair at its original color."""
+    pixels = skin.load()
+    visible_head = {
+        (x, y) for x, y in hair if y < 16 and pixels[x, y][3] >= 48
+        and (x >= 32 or pixels[x + 32, y][3] < 48)
+    }
+    dark = {point for point in visible_head if max(pixels[point][:3]) <= 48}
+    light = {point for point in visible_head if max(pixels[point][:3]) >= 128}
+    minimum = max(20, len(visible_head) * .2)
+    if min(len(dark), len(light)) < minimum or len(visible_head - dark - light) > len(visible_head) * .2:
+        return set()
+    # Look for opposing palettes on the front or back of the head. A bright
+    # bow or streak on a side face alone shouldn't block regular recoloring.
+    for left in (FACE_FRONT[0], 24):
+        halves = [{(x, y) for x, y in visible_head if y >= 8 and start <= x % 32 < start + 4}
+                  for start in (left, left + 4)]
+        for dark_side, light_side in (halves, halves[::-1]):
+            if (len(dark & dark_side) >= max(12, len(dark_side) * .65)
+                    and len(light & light_side) >= max(12, len(light_side) * .65)):
+                return {point for point in hair if pixels[point][3] >= 48 and max(pixels[point][:3]) <= 48}
+    return set()
+
+
 def apply_face_template(
     styled: Image.Image,
     original: Image.Image,
@@ -1673,12 +2001,15 @@ def apply_face_template(
     face_fill_color: RGB | None = None,
     eyes_over_bangs: bool = True,
     preserve_hat_layer_lashes: bool = True,
+    *,
+    protected_hair: set[tuple[int, int]] | None = None,
 ) -> Image.Image:
     styled, _ = normalize_skin(styled)
     original, _ = normalize_skin(original)
     result = styled.copy()
     original_pixels = original.load()
     pixels = result.load()
+    protected_hair = protected_hair or set()
     destination_skin = _median_skin_color(original, original_hair_mask)
     fill = face_fill_color or (template.skin_color if match_reference_skin_tone else destination_skin)
     original_anchor = detect_eye_anchor(original, destination_skin)
@@ -1718,6 +2049,7 @@ def apply_face_template(
         coordinate = (x, y + vertical_shift)
         if (
             EYE_SEARCH_BOX[1] <= coordinate[1] < EYE_SEARCH_BOX[3]
+            and coordinate not in protected_hair
             and (eyes_over_bangs or coordinate not in original_hair_mask)
         ):
             pixels[coordinate[0], coordinate[1]] = color
@@ -1732,6 +2064,8 @@ def apply_face_template(
             if x not in EYE_FEATURE_COLUMNS:
                 continue
             overlay = (x + overlay_offset, y)
+            if overlay in protected_hair:
+                continue
             keep_lash = preserve_hat_layer_lashes and probable_hat_lash(original_pixels[overlay[0], overlay[1]])
             if overlay not in original_hair_mask and not keep_lash:
                 pixels[overlay[0], overlay[1]] = (0, 0, 0, 0)
@@ -1742,6 +2076,8 @@ def apply_face_template(
             coordinate = (x, y + vertical_shift)
             if EYE_SEARCH_BOX[1] <= coordinate[1] < EYE_SEARCH_BOX[3]:
                 overlay = (coordinate[0] + overlay_offset, coordinate[1])
+                if overlay in protected_hair:
+                    continue
                 keep_lash = preserve_hat_layer_lashes and probable_hat_lash(original_pixels[overlay[0], overlay[1]])
                 if not keep_lash:
                     pixels[overlay[0], overlay[1]] = (0, 0, 0, 0)
@@ -1752,7 +2088,7 @@ def apply_face_template(
 
 def style_skin(
     image: Image.Image,
-    target_hair_color: RGB,
+    target_hair_color: RGB | None,
     tolerance: float = 42.0,
     face_template: FaceTemplate | None = None,
     match_reference_skin_tone: bool = False,
@@ -1775,6 +2111,8 @@ def style_skin(
     )
     effective_hair_mask = set() if suppress_hair else set(classification.hair)
     effective_head_hair_mask = set() if suppress_hair else {coordinate for coordinate in classification.hair if coordinate[1] < 16}
+    dark_strands = (_split_dye_dark_strands(normalized, effective_hair_mask)
+                    if target_hair_color is not None or face_template is not None else set())
     skin_mask = set(classification.skin)
     accessory_mask = set(classification.accessory)
     outfit_mask = set(classification.outfit)
@@ -1788,25 +2126,21 @@ def style_skin(
         )
     else:
         base = normalized
-    styled, _mask = recolor_hair(
-        base,
-        target_hair_color,
-        tolerance,
-        effective_hair_mask,
-        effective_head_hair_mask,
-        colorize_neutrals=True,
-        neutral_saturation_floor=0.52,
-    )
-    if target_outfit_color is not None:
-        styled, _outfit_mask = recolor_hair(
-            styled,
-            target_outfit_color,
+    # None disables recoloring without discarding the hair mask: eye/bang
+    # protection must still work when the studio's hair toggle is off.
+    styled = base.copy()
+    if target_hair_color is not None:
+        styled, _mask = recolor_hair(
+            base,
+            target_hair_color,
             tolerance,
-            outfit_mask,
-            outfit_mask,
+            effective_hair_mask - dark_strands,
+            effective_head_hair_mask - dark_strands,
             colorize_neutrals=True,
-            neutral_saturation_floor=0.68,
+            neutral_saturation_floor=0.52,
         )
+    if target_outfit_color is not None:
+        styled = _recolor_outfit(styled, target_outfit_color, outfit_mask)
     if target_accessory_color is not None:
         styled, _accessory_mask = recolor_hair(
             styled,
@@ -1826,6 +2160,7 @@ def style_skin(
             target_skin_color,
             eyes_over_bangs,
             preserve_hat_layer_lashes,
+            protected_hair=dark_strands,
         )
     return styled, effective_hair_mask, was_normalized
 
@@ -1971,6 +2306,32 @@ def _draw_texture_plane(
     canvas.alpha_composite(layer)
 
 
+def player_uv_parts(slim: bool):
+    """Base/outer origins and (width, depth, height) for each skin part."""
+    arm = 3 if slim else 4
+    return (
+        ("Head", (0, 0), (32, 0), 8, 8, 8),
+        ("Torso", (16, 16), (16, 32), 8, 4, 12),
+        ("Right arm", (40, 16), (40, 32), arm, 4, 12),
+        ("Left arm", (32, 48), (48, 48), arm, 4, 12),
+        ("Right leg", (0, 16), (0, 32), 4, 4, 12),
+        ("Left leg", (16, 48), (0, 48), 4, 4, 12),
+    )
+
+
+def cuboid_face_boxes(origin, width, depth, height):
+    """Texture rectangles for the six faces of a standard Minecraft UV net."""
+    u, v = origin
+    return {
+        "right": (u, v + depth, u + depth, v + depth + height),
+        "front": (u + depth, v + depth, u + depth + width, v + depth + height),
+        "left": (u + depth + width, v + depth, u + depth + width + depth, v + depth + height),
+        "back": (u + 2 * depth + width, v + depth, u + 2 * depth + 2 * width, v + depth + height),
+        "top": (u + depth, v, u + depth + width, v + depth),
+        "bottom": (u + depth + width, v, u + depth + 2 * width, v + depth),
+    }
+
+
 def _cuboid_face_layers(
     skin: Image.Image,
     base_uv: tuple[int, int],
@@ -1981,24 +2342,8 @@ def _cuboid_face_layers(
 ) -> dict[str, tuple[Image.Image, Image.Image]]:
     """Return separate base/outer faces from a standard Minecraft UV net."""
 
-    def boxes(origin: tuple[int, int]) -> dict[str, tuple[int, int, int, int]]:
-        u, v = origin
-        return {
-            "right": (u, v + depth, u + depth, v + depth + height),
-            "front": (u + depth, v + depth, u + depth + width, v + depth + height),
-            "left": (u + depth + width, v + depth, u + depth + width + depth, v + depth + height),
-            "back": (
-                u + depth + width + depth,
-                v + depth,
-                u + depth + width + depth + width,
-                v + depth + height,
-            ),
-            "top": (u + depth, v, u + depth + width, v + depth),
-            "bottom": (u + depth + width, v, u + depth + width + width, v + depth),
-        }
-
-    base_boxes = boxes(base_uv)
-    overlay_boxes = boxes(overlay_uv)
+    base_boxes = cuboid_face_boxes(base_uv, width, depth, height)
+    overlay_boxes = cuboid_face_boxes(overlay_uv, width, depth, height)
     return {
         name: (skin.crop(base_boxes[name]), skin.crop(overlay_boxes[name]))
         for name in ("front", "right", "back", "left", "top", "bottom")
@@ -2114,25 +2459,12 @@ def render_player_3d(
                 quads.append((average_depth, polygon, color))
 
     arm_width = 3 if slim else 4
-    parts = (
-        (_cuboid_face_layers(normalized, (0, 0), (32, 0), 8, 8, 8), (0.0, 28.0, 0.0), (8.0, 8.0, 8.0), 0.50),
-        (_cuboid_face_layers(normalized, (16, 16), (16, 32), 8, 4, 12), (0.0, 18.0, 0.0), (8.0, 12.0, 4.0), 0.25),
-        (
-            _cuboid_face_layers(normalized, (40, 16), (40, 32), arm_width, 4, 12),
-            (-(4.0 + arm_width / 2), 18.0, 0.0),
-            (float(arm_width), 12.0, 4.0),
-            0.25,
-        ),
-        (
-            _cuboid_face_layers(normalized, (32, 48), (48, 48), arm_width, 4, 12),
-            (4.0 + arm_width / 2, 18.0, 0.0),
-            (float(arm_width), 12.0, 4.0),
-            0.25,
-        ),
-        (_cuboid_face_layers(normalized, (0, 16), (0, 32), 4, 4, 12), (-2.0, 6.0, 0.0), (4.0, 12.0, 4.0), 0.25),
-        (_cuboid_face_layers(normalized, (16, 48), (0, 48), 4, 4, 12), (2.0, 6.0, 0.0), (4.0, 12.0, 4.0), 0.25),
-    )
-    for faces, center, dimensions, outer_expansion in parts:
+    centers = ((0, 28, 0), (0, 18, 0), (-4 - arm_width / 2, 18, 0),
+               (4 + arm_width / 2, 18, 0), (-2, 6, 0), (2, 6, 0))
+    for (name, base_uv, outer_uv, width, depth, height), center in zip(player_uv_parts(slim), centers):
+        faces = _cuboid_face_layers(normalized, base_uv, outer_uv, width, depth, height)
+        dimensions = (width, height, depth)
+        outer_expansion = .50 if name == "Head" else .25
         for face, (base_texture, outer_texture) in faces.items():
             add_face(face, base_texture, center, dimensions, 0.0)
             if show_outer_layers:
@@ -2151,6 +2483,25 @@ def render_player_3d(
     right = min(canvas.width, bounds[2] + margin)
     bottom = min(canvas.height, bounds[3] + margin)
     return canvas.crop((left, top, right, bottom))
+
+
+def wardrobe_batch_includes(saved: dict[str, object], batch_filter: str) -> bool:
+    """Share local batch eligibility between the Styler preview and generator."""
+    status = saved.get("status", "unsorted")
+    if status in ("maybe", "remove"):
+        return False
+    requested = batch_filter.strip().casefold()
+    if requested == "kept":
+        return status in ("keep", "favorite")
+    if requested in ("", "all"):
+        # Legacy All included skins without a decision (old Keep was Unsorted).
+        return True
+    pieces = {piece.strip() for piece in re.split(r"[+,&]", requested) if piece.strip()}
+    if pieces.intersection(("favorites", "favorite")):
+        if status != "favorite":
+            return False
+        pieces.difference_update(("favorites", "favorite"))
+    return not pieces or str(saved.get("tag", "other")).casefold() in pieces
 
 
 def generate_folder(
@@ -2193,24 +2544,8 @@ def generate_folder(
     files = sorted(input_folder.rglob("*.png"), key=lambda path: path.name.casefold())
     metadata = wardrobe_metadata or {}
 
-    def included(path: Path) -> bool:
-        relative = path.relative_to(input_folder).as_posix()
-        saved = metadata.get(relative, {})
-        if str(saved.get("status", "unsorted")) == "remove":
-            return False
-        requested = batch_filter.strip().casefold()
-        if requested in ("", "all", "kept"):
-            return True
-        favorite = str(saved.get("status", "unsorted")) == "favorite"
-        tag = str(saved.get("tag", "other")).casefold()
-        pieces = {piece for piece in re.split(r"[+,&]", requested) if piece}
-        if "favorites" in pieces or "favorite" in pieces:
-            if not favorite:
-                return False
-            pieces -= {"favorites", "favorite"}
-        return not pieces or tag in pieces
-
-    files = [path for path in files if included(path)]
+    files = [path for path in files
+             if wardrobe_batch_includes(metadata.get(path.relative_to(input_folder).as_posix(), {}), batch_filter)]
     if not files:
         raise ValueError("No kept PNG skins match the selected wardrobe batch")
 

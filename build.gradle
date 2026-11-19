@@ -12,19 +12,45 @@ base {
 
 repositories {
     maven { url = 'https://maven.fabricmc.net/' }
+    exclusiveContent {
+        forRepository { maven { url = 'https://api.modrinth.com/maven' } }
+        filter { includeGroup 'maven.modrinth' }
+    }
 }
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-    compileOnly files('libs/fabrictailor-2.10.0.jar')
+    compileOnly "maven.modrinth:fabrictailor:${project.fabrictailor_version}"
+    // Fabric Tailor stays external to the released DD jar, but it must be
+    // present in the isolated Loom client/server playground.
+    runtimeOnly "maven.modrinth:fabrictailor:${project.fabrictailor_version}"
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.11.4'
 }
 
+loom {
+    runs {
+        // These are deliberately separate from Modrinth's active runtime. They have their
+        // own config, saves, logs, and mods folders for safe DD playtesting.
+        client {
+            runDirectory = file("dev-workspace/${project.minecraft_version}/client")
+        }
+        server {
+            runDirectory = file("dev-workspace/${project.minecraft_version}/server")
+            programArguments.add('--nogui')
+        }
+    }
+}
+
 test {
     useJUnitPlatform()
+}
+
+tasks.named('runServer', JavaExec) {
+    standardInput = System.in
+    maxHeapSize = '2G'
 }
 
 processResources {

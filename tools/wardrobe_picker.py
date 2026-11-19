@@ -21,6 +21,7 @@ from skin_styler_core import detect_skin_model, normalize_skin, render_player_vi
 STATUSES = {
     "unsorted": ("Unsorted", "#454A52"),
     "favorite": ("Favorite", "#A83F70"),
+    "keep": ("Keep", "#537766"),
     "maybe": ("Maybe", "#9A7435"),
     "remove": ("Remove", "#77434A"),
 }
@@ -75,10 +76,10 @@ def find_visual_duplicates(entries: list[SkinEntry]) -> dict[str, int]:
 
 
 class PickerState:
-    def __init__(self, source: Path) -> None:
+    def __init__(self, source: Path, *, state_directory: Path | None = None) -> None:
         appdata = os.environ.get("APPDATA")
         root = Path(appdata) if appdata else Path.home() / ".config"
-        self.path = root / "Daily Dress Skin Styler" / "wardrobe-picker-state.json"
+        self.path = (state_directory or root / "Daily Dress Skin Styler") / "wardrobe-picker-state.json"
         self.source_key = str(source.resolve()).casefold()
         self.data: dict = {"version": 2, "sources": {}}
         try:
@@ -98,44 +99,120 @@ class PickerState:
         tag = saved.get("tag", "other")
         if status not in STATUSES:
             status = "unsorted"
-        if tag not in TAGS:
+        if tag not in self.categories():
             tag = "other"
         return {"status": status, "tag": tag}
 
+    def categories(self):
+        return {**TAGS, **self.data.get("categories", {}).get(self.source_key, {})}
+
+    def is_shading_base(self, relative):
+        return self.source_data.get(relative, {}).get("shadingBase") is True
+
+    def set_shading_base(self, relative, enabled):
+        entry = dict(self.source_data.get(relative, {}))
+        entry["shadingBase"] = enabled
+        self._write_entry(relative, entry)
+
+    def save_category(self, key, name):
+        records = self.data.setdefault("categories", {}).setdefault(self.source_key, {})
+        before = records.copy()
+        records[key] = name
+        try:
+            self.save()
+        except OSError:
+            records.clear()
+            records.update(before)
+            raise
+
     def set(self, relative: str, *, status: str | None = None, tag: str | None = None) -> None:
-        current = dict(self.source_data.get(relative, {}))
+        prior = self.source_data.get(relative)
+        current = dict(prior or {})
         current.update(self.get(relative))
         if status is not None:
             current["status"] = status
         if tag is not None:
             current["tag"] = tag
+        self._write_entry(relative, current)
+
+    def _write_entry(self, relative, current):
+        prior = self.source_data.get(relative)
         self.source_data[relative] = current
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            if prior is None:
+                self.source_data.pop(relative, None)
+            else:
+                self.source_data[relative] = prior
+            raise
+
+    def style(self, relative):
+        return self.source_data.get(relative, {}).get("style")
+
+    def stage_style(self, relative, options):
+        entry = dict(self.source_data.get(relative, {}))
+        entry["style"] = dict(options)
+        self.source_data[relative] = entry
+
+    def looks(self):
+        for relative, entry in self.source_data.items():
+            look = entry.get("look")
+            if isinstance(look, dict) and isinstance(look.get("source"), str) and isinstance(look.get("name"), str):
+                yield relative, look
+
+    def duplicate_look(self, relative, new_relative, source, name, style):
+        entry = dict(self.source_data.get(relative, {}))
+        entry.pop("shadingBase", None)
+        entry.update(status="unsorted", style=dict(style), look={"source": source, "name": name})
+        self._write_entry(new_relative, entry)
+
+    def copy_painted_skin(self, relative, new_relative, style):
+        entry = dict(self.source_data.get(relative, {}))
+        entry.pop("look", None)
+        entry.pop("shadingBase", None)
+        entry.update(status="unsorted", style=dict(style))
+        self._write_entry(new_relative, entry)
 
     def details(self, relative: str) -> dict[str, object]:
         """Return styling metadata while keeping ``get`` backward-compatible."""
 
         basic = self.get(relative)
         saved = self.source_data.get(relative, {})
-        model = str(saved.get("model", "auto"))
-        if model not in ("auto", "slim", "classic"):
-            model = "auto"
         corrections = saved.get("corrections", {})
         if not isinstance(corrections, dict):
             corrections = {}
         hair_mode = str(saved.get("hair_mode", "auto"))
         if hair_mode not in ("auto", "none"):
             hair_mode = "auto"
-        return {**basic, "model": model, "hair_mode": hair_mode, "corrections": dict(corrections)}
+        return {**basic, "model": self.model(relative), "hair_mode": hair_mode, "corrections": dict(corrections)}
+
+    def model(self, relative: str) -> str:
+        model = str(self.source_data.get(relative, {}).get("model", "auto"))
+        return model if model in ("slim", "classic") else "auto"
 
     def set_model(self, relative: str, model: str) -> None:
         if model not in ("auto", "slim", "classic"):
             raise ValueError(f"Unsupported skin model: {model}")
-        saved = dict(self.source_data.get(relative, {}))
+        prior = self.source_data.get(relative)
+        saved = dict(prior or {})
         saved.update(self.get(relative))
         saved["model"] = model
+        records = self.data.setdefault("approvals", {}).setdefault(self.source_key, {})
+        old_approval = records.get(relative)
+        if model != self.model(relative):
+            records.pop(relative, None)
         self.source_data[relative] = saved
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            if prior is None:
+                self.source_data.pop(relative, None)
+            else:
+                self.source_data[relative] = prior
+            if old_approval is not None:
+                records[relative] = old_approval
+            raise
 
     def set_hair_mode(self, relative: str, mode: str) -> None:
         if mode not in ("auto", "none"):
@@ -158,13 +235,44 @@ class PickerState:
         return parsed
 
     def set_corrections(self, relative: str, corrections: dict[tuple[int, int], str]) -> None:
+        previous = self.get_corrections(relative)
+        changed = {f"{x},{y}" for (x, y) in previous.keys() | corrections.keys()
+                   if previous.get((x, y)) != corrections.get((x, y))}
+        records = self.data.setdefault("approvals", {}).setdefault(self.source_key, {})
+        record = records.get(relative)
+        original_record = record
+        if isinstance(record, dict) and changed:
+            record = dict(record)
+            record["pixels"] = {k: v for k, v in record.get("pixels", {}).items() if k not in changed}
+            records[relative] = record
         saved = dict(self.source_data.get(relative, {}))
         saved.update(self.get(relative))
         saved["corrections"] = {
             f"{x},{y}": category for (x, y), category in sorted(corrections.items())
         }
-        self.source_data[relative] = saved
-        self.save()
+        try:
+            self._write_entry(relative, saved)
+        except OSError:
+            if record is not None:
+                records[relative] = original_record
+            raise
+
+    def approvals(self, relative: str, identity: dict) -> dict:
+        record = self.data.get("approvals", {}).get(self.source_key, {}).get(relative, {})
+        return dict(record.get("pixels", {})) if isinstance(record, dict) and record.get("identity") == identity else {}
+
+    def set_approvals(self, relative: str, identity: dict, pixels: dict) -> None:
+        records = self.data.setdefault("approvals", {}).setdefault(self.source_key, {})
+        prior = records.get(relative)
+        records[relative] = {"identity": identity, "pixels": dict(pixels)}
+        try:
+            self.save()
+        except OSError:
+            if prior is None:
+                records.pop(relative, None)
+            else:
+                records[relative] = prior
+            raise
 
     def generation_metadata(self) -> dict[str, dict[str, object]]:
         return {relative: self.details(relative) for relative in self.source_data}
@@ -316,7 +424,7 @@ class WardrobePicker(tk.Toplevel):
             export_frame,
             text=(
                 "No folder copies are needed. Close this view when you are done: the main Styler reads these saved choices, "
-                "skips Remove, and carries favorites/categories into the sync wardrobe."
+                "skips Maybe and Remove, and carries favorites/categories into the sync wardrobe."
             ),
             foreground="#777777",
             wraplength=260,
@@ -429,7 +537,7 @@ class WardrobePicker(tk.Toplevel):
         duplicates = self.duplicate_counts.get(relative)
         if duplicates:
             return f"SAME×{duplicates} · {STATUSES[state['status']][0]}"
-        return f"{STATUSES[state['status']][0]} · {TAGS[state['tag']]}"
+        return f"{STATUSES[state['status']][0]} · {self.state_store.categories()[state['tag']]}"
 
     def _thumbnail(self, entry: SkinEntry) -> ImageTk.PhotoImage:
         cached = self.thumbnail_cache.get(entry.relative)
@@ -467,7 +575,7 @@ class WardrobePicker(tk.Toplevel):
         duplicate_note = ""
         if relative in self.duplicate_counts:
             duplicate_note = f" · Same pixels as {self.duplicate_counts[relative] - 1} other skin(s)"
-        self.selected_status_var.set(f"{STATUSES[state['status']][0]} · {TAGS[state['tag']]}{duplicate_note}")
+        self.selected_status_var.set(f"{STATUSES[state['status']][0]} · {self.state_store.categories()[state['tag']]}{duplicate_note}")
         self.tag_var.set(state["tag"])
         try:
             with Image.open(entry.path) as image:
@@ -690,7 +798,7 @@ class WardrobePicker(tk.Toplevel):
             pieces = []
             if include_status:
                 pieces.append(STATUSES[saved["status"]][0])
-            pieces.append(TAGS[saved["tag"]])
+            pieces.append(self.state_store.categories()[saved["tag"]])
             destination = target.joinpath(*pieces, Path(entry.relative))
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(entry.path, destination)

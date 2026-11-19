@@ -1,0 +1,14 @@
+{
+  "name": "daily-dress-viewport",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild viewport.js --bundle --format=iife --minify --legal-comments=inline --outfile=dist/viewport.js && node -e \"require('node:fs').copyFileSync('node_modules/three/LICENSE', 'dist/THREE-LICENSE.txt')\""
+  },
+  "dependencies": {
+    "three": "0.165.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

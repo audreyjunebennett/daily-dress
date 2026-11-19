@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' file: qrc:; style-src 'unsafe-inline'; connect-src 'none'">
+<title>Daily Dress player viewport</title>
+<style>
+html,body,#viewport{width:100%;height:100%;margin:0;overflow:hidden;background:transparent}
+canvas{width:100%;height:100%;display:block;touch-action:none}
+#viewport{position:relative}
+.pixel-outline{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+</style>
+<main id="viewport" aria-label="Minecraft skin viewport"></main>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="dist/viewport.js"></script>
+</html>

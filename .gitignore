@@ -7,6 +7,9 @@ deploy/
 *.iml
 
 run/
+dev-workspace/
+tools/viewport/node_modules/
+tools/viewport/dist/
 
 __pycache__/
 *.py[cod]

@@ -301,13 +301,13 @@ class IntegratedWorkbench(ttk.Frame):
             background = STATUSES[state["status"]][1]
             card = tk.Frame(
                 gallery,
-                width=96,
-                height=113,
+                width=118,
+                height=145,
                 background=background,
                 highlightthickness=3 if selected or eye_selected else 1,
                 highlightbackground=COLORS["water"] if eye_selected else (COLORS["gold"] if selected else COLORS["stone_dark"]),
             )
-            card.grid(row=index // 5, column=index % 5, padx=4, pady=4, sticky="n")
+            card.grid(row=index // 4, column=index % 4, padx=5, pady=5, sticky="n")
             card.grid_propagate(False)
             photo = self._thumbnail(path, self.mode)
             button = tk.Button(
@@ -326,7 +326,7 @@ class IntegratedWorkbench(ttk.Frame):
                 text=self._friendly_name(path.stem),
                 background=background,
                 foreground=COLORS["cream"],
-                wraplength=88,
+                wraplength=108,
                 font=("TkDefaultFont", 7),
             )
             label.pack(fill="x", padx=2)
@@ -345,7 +345,7 @@ class IntegratedWorkbench(ttk.Frame):
             for widget in (card, label, footer):
                 widget.bind("<Button-1>", lambda _event, chosen=path: self._choose_gallery_item(chosen))
                 widget.bind("<MouseWheel>", self._scroll_gallery)
-        for column in range(5):
+        for column in range(4):
             gallery.columnconfigure(column, weight=1)
         self.count_var.set(f"{len(visible)} of {len(self.app._sample_paths)} skins shown · scroll for the full library")
         self.after_idle(lambda: self.gallery_canvas.yview_moveto(self._scroll_fraction))
@@ -372,7 +372,7 @@ class IntegratedWorkbench(ttk.Frame):
             if mode == "eyes":
                 preview = render_front_face(normalized, 5)
             else:
-                preview = render_player_view(normalized, scale=2, slim=detect_skin_model(normalized) == "slim")
+                preview = render_player_view(normalized, scale=3, slim=detect_skin_model(normalized) == "slim")
         except Exception:
             preview = Image.new("RGBA", (40, 55), (95, 42, 49, 255))
             draw = ImageDraw.Draw(preview)
